@@ -1,0 +1,42 @@
+# --- Web Framework & Server ---
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic-settings
+
+# --- PDF Parsing & Layout Engines ---
+pdfplumber
+pypdf
+pymupdf
+pytesseract
+pdf2image
+pillow
+
+# --- LangChain & AI Orchestration ---
+langchain
+langchain-core
+langchain-community
+langchain-openai
+langchain-text-splitters
+langgraph
+
+# --- Vector Database, Search & Embeddings ---
+sentence-transformers
+chromadb
+rank_bm25
+qdrant-client
+
+# --- Document Parsing (DOCX) ---
+python-docx
+
+# --- Auth / Security ---
+passlib[bcrypt]
+bcrypt==4.0.1
+python-jose[cryptography]
+
+# --- Database ---
+sqlalchemy
+psycopg2-binary
+
+# --- Environment & Utils ---
+python-dotenv

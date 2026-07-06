@@ -1,0 +1,55 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: audito-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./backend/data:/backend/data
+      - ./backend/chroma_db:/backend/chroma_db
+      - ./backend/bm25_cache:/backend/bm25_cache
+      - ./backend/chat_history:/backend/chat_history
+      - ./backend/debug_logs:/backend/debug_logs
+    depends_on:
+      - postgres
+      - qdrant
+      - redis
+
+  postgres:
+    image: postgres:16
+    container_name: audito-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: audito_user
+      POSTGRES_PASSWORD: audito_pass
+      POSTGRES_DB: audito_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - audito_pg_data:/var/lib/postgresql/data
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: audito-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - audito_qdrant_data:/qdrant/storage
+
+  redis:
+    image: redis:7-alpine
+    container_name: audito-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    # Reserved for the upcoming background worker queue (parsing/embedding jobs)
+
+volumes:
+  audito_pg_data:
+  audito_qdrant_data:
