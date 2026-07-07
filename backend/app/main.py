@@ -1,10 +1,10 @@
 import traceback
 import os
-import json
 import uuid
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
 
 # App imports
 from app.db import get_db, Base, engine
@@ -17,6 +17,7 @@ from app.workflow import build_workflow
 from app.tasks import process_document_task
 from app.celery_app import celery_app
 from celery.result import AsyncResult
+from app import history
 
 app = FastAPI(title="AUDITO AI Multiuser RAG Engine")
 
@@ -36,9 +37,7 @@ print("[System] Compiling Multi-Tenant LangGraph Workflow Architecture...")
 rag_agent_executor = build_workflow()
 print("[System] LangGraph Workflow Compiled successfully.")
 
-HISTORY_DIR = "./chat_history"
 TEMP_UPLOAD_DIR = "./temp_uploads"
-os.makedirs(HISTORY_DIR, exist_ok=True)
 os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)  # Create local scratch storage lane
 
 
@@ -49,15 +48,33 @@ async def health_check():
     }
 
 
+# =====================================================
+# CONVERSATIONS — lets the frontend rebuild its sidebar after a fresh
+# login / restart from Postgres, instead of only from whatever session_ids
+# happen to still be sitting in the current browser tab.
+# =====================================================
+
+@app.get("/api/conversations")
+async def list_conversations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return {"conversations": history.list_conversations(db, current_user.id)}
+
+
 @app.get("/api/chat/history/{user_id}/{session_id}")
-async def get_chat_history(user_id: str, session_id: str):
-    history_file = os.path.join(HISTORY_DIR, f"{user_id}_{session_id}.json")
+async def get_chat_history(
+    user_id: str,
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # A logged-in user can only ever read their own history, regardless of
+    # what user_id shows up in the URL.
+    if str(current_user.id) != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to view this history.")
 
-    if os.path.exists(history_file):
-        with open(history_file, "r") as f:
-            return {"history": json.load(f)}
-
-    return {"history": []}
+    return {"history": history.get_history(db, current_user.id, session_id)}
 
 
 # =====================================================
@@ -71,8 +88,8 @@ async def upload_document(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Stages incoming payloads to local temp disk before issuing references 
-    down into Celery. Preserves Redis transport pipelines from hitting 
+    Stages incoming payloads to local temp disk before issuing references
+    down into Celery. Preserves Redis transport pipelines from hitting
     Upstash cloud size constraints.
     """
     user_id = str(current_user.id)
@@ -153,6 +170,7 @@ async def upload_status(task_id: str, current_user: User = Depends(get_current_u
 async def secure_chat(
     query: str = Form(...),
     session_id: str = Form(...),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     user_id = str(current_user.id)
@@ -188,29 +206,10 @@ async def secure_chat(
         print("Generated Response:")
         print(response_text[:300])
 
-        history_file = os.path.join(
-            HISTORY_DIR,
-            f"{user_id}_{session_id}.json"
-        )
-
-        history = []
-
-        if os.path.exists(history_file):
-            with open(history_file, "r") as f:
-                history = json.load(f)
-
-        history.append({
-            "sender": "user",
-            "text": query
-        })
-
-        history.append({
-            "sender": "bot",
-            "text": response_text
-        })
-
-        with open(history_file, "w") as f:
-            json.dump(history, f)
+        # Persisted to Postgres — survives `docker compose down/up` and
+        # logins from a different browser/device, unlike the old JSON file
+        # keyed only by whatever session_id this browser tab still had.
+        history.save_chat_turn(db, current_user.id, session_id, query, response_text)
 
         print("CHAT SUCCESS\n")
 
@@ -240,13 +239,11 @@ async def secure_chat(
 @app.delete("/api/session/{session_id}")
 async def clear_session(
     session_id: str,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     user_id = str(current_user.id)
     MultiUserRetriever.clear_session(user_id, session_id)
-
-    history_file = os.path.join(HISTORY_DIR, f"{user_id}_{session_id}.json")
-    if os.path.exists(history_file):
-        os.remove(history_file)
+    history.delete_conversation(db, current_user.id, session_id)
 
     return {"status": "success", "detail": f"Session {session_id} cleared for user {user_id}."}

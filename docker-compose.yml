@@ -15,10 +15,43 @@ services:
       - ./backend/bm25_cache:/backend/bm25_cache
       - ./backend/chat_history:/backend/chat_history
       - ./backend/debug_logs:/backend/debug_logs
+      - ./backend/temp_uploads:/backend/temp_uploads
     depends_on:
       - postgres
       - qdrant
       - redis
+
+  worker:
+    build:
+      context: ./backend
+    container_name: audito-worker
+    # Was `-A app.tasks`, which has no Celery app instance in it — the
+    # actual Celery() object lives in app/celery_app.py as `celery_app`.
+    command: celery -A app.celery_app.celery_app worker --loglevel=info --concurrency=1
+    env_file:
+      - ./backend/.env
+    volumes:
+      # Was `./backend:/app` — the Dockerfile's WORKDIR is /backend, and
+      # the web process writes uploads/vectors/history relative to that
+      # same path. Mounting to /app put the worker in a totally different
+      # filesystem, so it could never find files the web process saved.
+      # These five mounts now match the `backend` service exactly.
+      - ./backend/data:/backend/data
+      - ./backend/chroma_db:/backend/chroma_db
+      - ./backend/bm25_cache:/backend/bm25_cache
+      - ./backend/chat_history:/backend/chat_history
+      - ./backend/debug_logs:/backend/debug_logs
+      - ./backend/temp_uploads:/backend/temp_uploads
+    depends_on:
+      - postgres
+      - redis
+    # concurrency=1: parser.py now fans a single PDF's pages out across up
+    # to 6 CPU processes internally (tuned for your 10-core i5-1235U).
+    # Running 2+ documents at once on top of that would oversubscribe the
+    # machine and make everything slower, not faster.
+    #
+    # Scale across machines later with, e.g.:
+    #   docker compose up --scale worker=3
 
   postgres:
     image: postgres:16
@@ -48,19 +81,6 @@ services:
     restart: unless-stopped
     ports:
       - "6379:6379"
-    # Reserved for the upcoming background worker queue (parsing/embedding jobs)
-worker:
-    build:
-      context: ./backend
-    container_name: audito-worker
-    command: celery -A app.tasks worker --loglevel=info
-    depends_on:
-      - postgres
-      - redis
-    env_file:
-      - ./backend/.env
-    volumes:
-      - ./backend:/app  # Ensure your code is mapped correctly
 
 volumes:
   audito_pg_data:
