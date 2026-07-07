@@ -1,6 +1,7 @@
 import traceback
 import os
 import json
+import uuid
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +14,9 @@ from app.routes_auth import router as auth_router
 from app.parser import MultiUserParser
 from app.retriever import MultiUserRetriever
 from app.workflow import build_workflow
+from app.tasks import process_document_task
+from app.celery_app import celery_app
+from celery.result import AsyncResult
 
 app = FastAPI(title="AUDITO AI Multiuser RAG Engine")
 
@@ -33,7 +37,9 @@ rag_agent_executor = build_workflow()
 print("[System] LangGraph Workflow Compiled successfully.")
 
 HISTORY_DIR = "./chat_history"
+TEMP_UPLOAD_DIR = "./temp_uploads"
 os.makedirs(HISTORY_DIR, exist_ok=True)
+os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)  # Create local scratch storage lane
 
 
 @app.get("/")
@@ -64,6 +70,11 @@ async def upload_document(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
 ):
+    """
+    Stages incoming payloads to local temp disk before issuing references 
+    down into Celery. Preserves Redis transport pipelines from hitting 
+    Upstash cloud size constraints.
+    """
     user_id = str(current_user.id)
     try:
         print("\n==============================")
@@ -73,47 +84,36 @@ async def upload_document(
         print("Session:", session_id)
         print("File:", file.filename)
 
-        print("STEP 1 - Reading file")
-        file_bytes = await file.read()
-        print("File read complete")
+        # Generate a distinct local filename string to avoid cross-user collisions
+        unique_prefix = uuid.uuid4().hex
+        safe_filename = f"{unique_prefix}_{file.filename}"
+        local_file_path = os.path.join(TEMP_UPLOAD_DIR, safe_filename)
 
-        print("STEP 2 - Parsing document")
-        final_chunks = MultiUserParser.parse_uploaded_stream(
-            file_bytes=file_bytes,
-            file_name=file.filename,
-            user_id=user_id,
-            session_id=session_id,
-        )
-        print("Parsing complete")
+        # Stream file parts directly down onto server drive storage
+        file_has_content = False
+        with open(local_file_path, "wb") as buffer:
+            while chunk := await file.read(65536):  # Read in 64KB chunks
+                file_has_content = True
+                buffer.write(chunk)
 
-        if not final_chunks:
-            raise HTTPException(
-                status_code=422,
-                detail="Extraction failed: No content could be mapped."
-            )
+        if not file_has_content:
+            if os.path.exists(local_file_path):
+                os.remove(local_file_path)
+            raise HTTPException(status_code=422, detail="Uploaded file is empty.")
 
-        print(f"Chunks created: {len(final_chunks)}")
-
-        print("STEP 3 - Saving to vector store")
-        success = MultiUserRetriever.ingest_documents(
-            final_chunks,
+        # Dispatch ONLY paths and minimal metadata elements over Redis broker networks
+        task = process_document_task.delay(
+            local_file_path,
+            file.filename,
             user_id,
-            session_id
+            session_id,
         )
 
-        print("Ingestion completed")
-
-        if not success:
-            raise HTTPException(
-                status_code=500,
-                detail="Database ingestion failed."
-            )
-
-        print("UPLOAD FINISHED\n")
+        print(f"Enqueued Celery task: {task.id}\n")
 
         return {
-            "status": "success",
-            "total_chunks_indexed": len(final_chunks),
+            "status": "queued",
+            "task_id": task.id,
         }
 
     except HTTPException:
@@ -122,6 +122,27 @@ async def upload_document(
         print("\nUPLOAD FAILED")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/upload/status/{task_id}")
+async def upload_status(task_id: str, current_user: User = Depends(get_current_user)):
+    """Poll this from the frontend to drive the 'parsing stages' UI and know when a document is ready to query."""
+    result = AsyncResult(task_id, app=celery_app)
+
+    if result.state == "PENDING":
+        return {"state": "PENDING", "detail": "Task not found or not yet started."}
+
+    if result.state in ("PARSING", "EMBEDDING"):
+        return {"state": result.state, "detail": (result.info or {}).get("stage")}
+
+    if result.state == "SUCCESS":
+        payload = result.result or {}
+        return {"state": "SUCCESS", **payload}
+
+    if result.state == "FAILURE":
+        return {"state": "FAILURE", "detail": str(result.info)}
+
+    return {"state": result.state}
 
 
 # =====================================================

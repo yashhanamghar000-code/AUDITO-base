@@ -15,7 +15,11 @@ COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", "audito_documents")
 
 EMBEDDING_DIM = 384  # matches BAAI/bge-small-en-v1.5
 
-client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY,timeout=60)
+client = QdrantClient(
+    url=os.getenv("QDRANT_URL"), 
+    api_key=os.getenv("QDRANT_API_KEY"),
+    timeout=60.0  # Raises the read threshold from 5 seconds to 60 seconds
+)
 
 
 def ensure_collection():
@@ -52,21 +56,18 @@ def _ensure_payload_indexes():
 ensure_collection()
 
 
-def upsert_chunks(texts, vectors, metadatas, user_id: str, session_id: str, batch_size: int = 100):
+def upsert_chunks(texts, vectors, metadatas, user_id: str, session_id: str):
     points = []
     for i, (text, vector, meta) in enumerate(zip(texts, vectors, metadatas)):
         payload = {"text": text, "user_id": user_id, "session_id": session_id, **meta}
         points.append(
             PointStruct(
-                id=str(uuid.uuid4()),
+                id=str(uuid.uuid4()),  # Qdrant requires UUID or int point IDs
                 vector=vector,
                 payload=payload,
             )
         )
-
-    for i in range(0, len(points), batch_size):
-        batch = points[i:i + batch_size]
-        client.upsert(collection_name=COLLECTION_NAME, points=batch)
+    client.upsert(collection_name=COLLECTION_NAME, points=points)
 
 
 def search(query_vector, user_id: str, session_id: str, top_k: int = 5):

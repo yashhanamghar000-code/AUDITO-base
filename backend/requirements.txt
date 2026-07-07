@@ -38,5 +38,9 @@ python-jose[cryptography]
 sqlalchemy
 psycopg2-binary
 
+# --- Background workers ---
+celery
+redis
+
 # --- Environment & Utils ---
 python-dotenv

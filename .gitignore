@@ -29,3 +29,33 @@ frontend/build/
 .DS_Store
 .idea/
 .vscode/
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Environment
+.env
+
+# Uploaded documents
+backend/temp_uploads/
+uploads/
+data/
+
+# Chroma / Vector DB
+chroma_db/
+chroma/
+vectorstore/
+persist_directory/
+
+# FAISS
+*.faiss
+*.pkl
+*.index
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

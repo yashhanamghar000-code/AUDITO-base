@@ -49,6 +49,18 @@ services:
     ports:
       - "6379:6379"
     # Reserved for the upcoming background worker queue (parsing/embedding jobs)
+worker:
+    build:
+      context: ./backend
+    container_name: audito-worker
+    command: celery -A app.tasks worker --loglevel=info
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./backend:/app  # Ensure your code is mapped correctly
 
 volumes:
   audito_pg_data:
