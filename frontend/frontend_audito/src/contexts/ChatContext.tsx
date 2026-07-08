@@ -101,8 +101,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const stopRef = useRef(false);
 
   // Re-hydrate whenever the logged-in user changes (login, logout, or
-  // switching accounts in the same tab). Each user only ever sees their own
-  // slice of sessionStorage.
+  // switching accounts in the same tab).
   useEffect(() => {
     if (!user) {
       setConversations([]);
@@ -110,6 +109,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       setActiveId(null);
       return;
     }
+
+    // 1. Instant paint from this tab's local cache, if any.
     try {
       const rawC = window.sessionStorage.getItem(convKey(user.id));
       setConversations(rawC ? JSON.parse(rawC) : []);
@@ -120,6 +121,32 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       setDocuments([]);
     }
     setActiveId(null);
+
+    // 2. Authoritative refresh from Postgres. This is what makes a chat
+    // from yesterday still show up today — sessionStorage is wiped when
+    // the browser closes, but the backend now persists every conversation
+    // in the `conversations` table regardless of what's left in this tab.
+    chatService
+      .listConversations()
+      .then((res) => {
+        const backendConvs = res.data.conversations ?? [];
+        setConversations((prev) => {
+          const byId = new Map(prev.map((c) => [c.id, c]));
+          return backendConvs.map((bc) => {
+            const existing = byId.get(bc.session_id);
+            return {
+              id: bc.session_id,
+              title: bc.title || existing?.title || "New Chat",
+              messages: existing?.messages ?? [],
+              updatedAt: bc.updated_at ? new Date(bc.updated_at).getTime() : (existing?.updatedAt ?? Date.now()),
+              documentIds: existing?.documentIds ?? [],
+            };
+          });
+        });
+      })
+      .catch(() => {
+        // backend unreachable — keep whatever local cache we already loaded
+      });
   }, [user?.id]);
 
   useEffect(() => {
@@ -171,6 +198,40 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         })
         .catch(() => {
           // No history yet for this session, or backend unreachable — keep local cache.
+        });
+
+      chatService
+        .listFiles(id)
+        .then((res) => {
+          const files = res.data.files ?? [];
+          setDocuments((prev) => {
+            const existingIds = new Set(prev.map((d) => d.id));
+            const rebuilt: UploadedDoc[] = files
+              .filter((f) => !existingIds.has(f.id))
+              .map((f) => ({
+                id: f.id,
+                name: f.name,
+                size: 0,
+                uploadedAt: f.created_at ? new Date(f.created_at).getTime() : Date.now(),
+                status: f.status === "indexed" ? "indexed" : f.status === "failed" ? "failed" : "processing",
+                progress: f.status === "indexed" ? 100 : 0,
+                stages: buildStages().map((s) => ({
+                  ...s,
+                  status: f.status === "indexed" ? ("done" as const) : s.status,
+                })),
+              }));
+            return [...prev, ...rebuilt];
+          });
+          setConversations((prev) =>
+            prev.map((c) =>
+              c.id === id
+                ? { ...c, documentIds: Array.from(new Set([...c.documentIds, ...files.map((f) => f.id)])) }
+                : c,
+            ),
+          );
+        })
+        .catch(() => {
+          // No files for this session, or backend unreachable — keep local cache.
         });
     },
     [user],

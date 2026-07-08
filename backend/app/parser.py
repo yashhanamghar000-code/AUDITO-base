@@ -13,10 +13,12 @@ from PIL import Image
 import docx
 
 # Your i5-1235U has 2 Performance + 8 Efficient cores = 10 logical cores.
-# We leave headroom for the FastAPI process, the embedding model, and the
-# OS, rather than grabbing every core for one PDF. Override with an env
-# var if you move this to a bigger machine.
-DEFAULT_PARSER_WORKERS = max(2, min(6, (os.cpu_count() or 4) - 2))
+# The Celery worker now runs up to 3 files concurrently (concurrency=3, see
+# docker-compose.yml) instead of 1, so each file's internal thread count is
+# capped lower here to compensate — 3 files x 3 threads = 9, still leaves
+# headroom for the FastAPI process, the embedding model, and the OS.
+# Override with an env var if you move this to a bigger machine.
+DEFAULT_PARSER_WORKERS = max(2, min(3, (os.cpu_count() or 4) - 2))
 PARSER_MAX_WORKERS = int(os.getenv("PARSER_MAX_WORKERS", DEFAULT_PARSER_WORKERS))
 
 

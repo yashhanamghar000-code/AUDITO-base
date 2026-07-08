@@ -56,7 +56,7 @@ def _ensure_payload_indexes():
 ensure_collection()
 
 
-def upsert_chunks(texts, vectors, metadatas, user_id: str, session_id: str):
+def upsert_chunks(texts, vectors, metadatas, user_id: str, session_id: str, batch_size: int = 100):
     points = []
     for i, (text, vector, meta) in enumerate(zip(texts, vectors, metadatas)):
         payload = {"text": text, "user_id": user_id, "session_id": session_id, **meta}
@@ -67,7 +67,11 @@ def upsert_chunks(texts, vectors, metadatas, user_id: str, session_id: str):
                 payload=payload,
             )
         )
-    client.upsert(collection_name=COLLECTION_NAME, points=points)
+    # Sent in batches, not one request for the whole file — a 971-chunk
+    # upsert as a single call is exactly what timed out earlier on a large
+    # report. Batches of 100 stay comfortably within the client's timeout.
+    for i in range(0, len(points), batch_size):
+        client.upsert(collection_name=COLLECTION_NAME, points=points[i:i + batch_size])
 
 
 def search(query_vector, user_id: str, session_id: str, top_k: int = 5):

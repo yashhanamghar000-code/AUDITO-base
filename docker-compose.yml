@@ -27,7 +27,7 @@ services:
     container_name: audito-worker
     # Was `-A app.tasks`, which has no Celery app instance in it — the
     # actual Celery() object lives in app/celery_app.py as `celery_app`.
-    command: celery -A app.celery_app.celery_app worker --loglevel=info --concurrency=1
+    command: celery -A app.celery_app.celery_app worker --loglevel=info --concurrency=3
     env_file:
       - ./backend/.env
     volumes:
@@ -45,10 +45,11 @@ services:
     depends_on:
       - postgres
       - redis
-    # concurrency=1: parser.py now fans a single PDF's pages out across up
-    # to 6 CPU processes internally (tuned for your 10-core i5-1235U).
-    # Running 2+ documents at once on top of that would oversubscribe the
-    # machine and make everything slower, not faster.
+    # concurrency=3: lets up to 3 users' uploads run at the same time instead
+    # of one file (e.g. a 49MB report) blocking every other user's upload
+    # until it finishes — which is what concurrency=1 caused. parser.py's
+    # own per-file thread count (PARSER_MAX_WORKERS) is capped lower to
+    # compensate, so 3 concurrent files still don't oversubscribe the CPU.
     #
     # Scale across machines later with, e.g.:
     #   docker compose up --scale worker=3

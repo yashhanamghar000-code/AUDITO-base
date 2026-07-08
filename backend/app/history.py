@@ -65,6 +65,29 @@ def list_conversations(db: Session, user_id: int) -> list[dict]:
     ]
 
 
+def list_files_for_conversation(db: Session, user_id: int, session_id: str) -> list[dict]:
+    """
+    Powers the document sidebar rebuild after a restart — previously only
+    chat messages reappeared after login, uploaded documents did not,
+    because nothing exposed the UploadedFile rows this table already had.
+    """
+    conv = db.query(Conversation).filter(
+        Conversation.session_id == session_id, Conversation.user_id == user_id
+    ).first()
+    if not conv:
+        return []
+    return [
+        {
+            "id": str(f.id),
+            "name": f.file_name,
+            "status": f.status,
+            "total_chunks_indexed": f.total_chunks_indexed,
+            "created_at": f.created_at.isoformat() if f.created_at else None,
+        }
+        for f in sorted(conv.files, key=lambda f: f.created_at)
+    ]
+
+
 def record_uploaded_file(db: Session, user_id: int, session_id: str, file_name: str, status: str, total_chunks_indexed: int = 0) -> None:
     conv = get_or_create_conversation(db, user_id, session_id, title_hint=file_name)
     db.add(UploadedFile(

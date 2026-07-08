@@ -17,7 +17,31 @@ export interface ChatResponse {
   sub_queries_used: string[];
 }
 
+export interface BackendConversation {
+  session_id: string;
+  title: string;
+  updated_at: string | null;
+  created_at: string | null;
+}
+
+export interface BackendFile {
+  id: string;
+  name: string;
+  status: string;
+  total_chunks_indexed: number;
+  created_at: string | null;
+}
+
 export const chatService = {
+  // Rebuilds the sidebar from Postgres — this is what makes chat history
+  // still show up after closing the browser overnight, instead of only
+  // existing for as long as this tab's sessionStorage survives.
+  listConversations: () =>
+    api.get<{ conversations: BackendConversation[] }>("/api/conversations"),
+
+  listFiles: (sessionId: string) =>
+    api.get<{ files: BackendFile[] }>(`/api/conversations/${sessionId}/files`),
+
   history: (userId: string, sessionId: string) =>
     api.get<{ history: BackendHistoryEntry[] }>(
       `/api/chat/history/${userId}/${sessionId}`,

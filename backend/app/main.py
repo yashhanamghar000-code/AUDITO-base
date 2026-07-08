@@ -62,6 +62,15 @@ async def list_conversations(
     return {"conversations": history.list_conversations(db, current_user.id)}
 
 
+@app.get("/api/conversations/{session_id}/files")
+async def list_conversation_files(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return {"files": history.list_files_for_conversation(db, current_user.id, session_id)}
+
+
 @app.get("/api/chat/history/{user_id}/{session_id}")
 async def get_chat_history(
     user_id: str,
