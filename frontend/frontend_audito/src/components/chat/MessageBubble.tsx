@@ -61,8 +61,8 @@ function UserAvatar() {
   );
 }
 
-export function MessageBubble({ message }: { message: Message }) {
-  const { regenerate, reactMessage, isStreaming } = useChat();
+export function MessageBubble({ message, isLast }: { message: Message; isLast?: boolean }) {
+  const { regenerate, reactMessage, isStreaming, sendMessage } = useChat();
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
 
@@ -155,6 +155,20 @@ export function MessageBubble({ message }: { message: Message }) {
             >
               <Share2 className="h-3.5 w-3.5" />
             </IconAction>
+          </div>
+        )}
+
+        {!isUser && isLast && !isStreaming && !!message.followUps?.length && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {message.followUps.map((q, i) => (
+              <button
+                key={i}
+                onClick={() => sendMessage(q)}
+                className="rounded-full border border-border px-3 py-1.5 text-xs text-foreground/80 transition-colors hover:border-foreground/40 hover:bg-accent hover:text-foreground"
+              >
+                {q}
+              </button>
+            ))}
           </div>
         )}
       </div>

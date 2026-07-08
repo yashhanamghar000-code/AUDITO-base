@@ -198,7 +198,8 @@ async def secure_chat(
             "chat_history": [],
             "sub_queries": [],
             "retrieved_docs": [],
-            "response": ""
+            "response": "",
+            "follow_up_questions": [],
         }
 
         print("STEP 1 - Running LangGraph")
@@ -227,6 +228,10 @@ async def secure_chat(
             "response": response_text,
             "sub_queries_used": final_output.get(
                 "sub_queries",
+                []
+            ),
+            "follow_up_questions": final_output.get(
+                "follow_up_questions",
                 []
             ),
         }

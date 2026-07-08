@@ -1,6 +1,6 @@
 import re
 import json
-from typing import List, Dict, Any, TypedDict, Annotated
+from typing import List, TypedDict, Annotated
 from operator import add
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -11,6 +11,8 @@ from langchain_core.documents import Document
 from app.config import llm, TOP_K_PER_QUERY, FINAL_DOCS_PER_QUERY, MAX_TOTAL_CONTEXT_DOCS
 from app.retriever import MultiUserRetriever
 
+FOLLOWUP_DELIMITER = "###FOLLOWUPS###"
+
 
 class AgentState(TypedDict):
     query: str
@@ -20,6 +22,7 @@ class AgentState(TypedDict):
     sub_queries: List[str]
     retrieved_docs: List[Document]
     response: str
+    follow_up_questions: List[str]
 
 
 def decompose_query(query: str, chat_history: List[str]) -> List[str]:
@@ -40,6 +43,35 @@ def decompose_query(query: str, chat_history: List[str]) -> List[str]:
     except Exception as e:
         print(f" Query optimization failed ({e}), falling back to raw query.")
     return [query]
+
+
+def _split_answer_and_followups(raw_content: str):
+    """
+    Splits one LLM response into (answer_text, follow_up_questions).
+    The model is asked to emit the delimiter + a JSON list at the very end
+    of its response, in the SAME call that produced the answer — this
+    avoids a second llm.invoke() round-trip on every single chat message
+    just to get 3 follow-up suggestions. Falls back to (raw_content, [])
+    on any parsing failure, so a malformed delimiter/JSON never breaks the
+    actual answer the user is waiting for.
+    """
+    if FOLLOWUP_DELIMITER not in raw_content:
+        return raw_content.strip(), []
+
+    answer_part, _, followup_part = raw_content.partition(FOLLOWUP_DELIMITER)
+    answer_part = answer_part.strip()
+
+    followup_part = followup_part.strip()
+    followup_part = re.sub(r"^```(json)?|```$", "", followup_part, flags=re.MULTILINE).strip()
+
+    try:
+        questions = json.loads(followup_part)
+        if isinstance(questions, list):
+            return answer_part, [str(q).strip() for q in questions if str(q).strip()][:3]
+    except Exception as e:
+        print(f" Follow-up question parsing failed ({e}), returning answer without follow-ups.")
+
+    return answer_part, []
 
 
 def decompose_node(state: AgentState):
@@ -93,7 +125,11 @@ def build_workflow():
 
     def generate_node(state: AgentState):
         if not state["retrieved_docs"]:
-            return {"response": "Data could not be localized within any current report segments.", "chat_history": []}
+            return {
+                "response": "Data could not be localized within any current report segments.",
+                "chat_history": [],
+                "follow_up_questions": [],
+            }
 
         context_blocks = []
         for i, d in enumerate(state["retrieved_docs"], start=1):
@@ -111,15 +147,31 @@ def build_workflow():
             "CRITICAL: Every row of your markdown table MUST be on its own line, separated by an actual physical newline carriage return (\\n). "
             "NEVER combine rows side-by-side using spaces, words, or double pipes '||'. Each row must start with '|' and end with '|\\n'.\n"
             "Leave exactly one blank newline before and after the table entirely.\n"
-            "CRITICAL RULE 3: ANTI-HALLUCINATION GUARD. Do not answer anything not provided in the text."
+            "CRITICAL RULE 4: SOURCE TABLE INTEGRITY. Tables extracted from the source PDF may have merged or multi-row headers that got "
+            "flattened, or a header row whose column count doesn't match the data rows below it. Do NOT reproduce a malformed table "
+            "structure verbatim. Instead: identify each data value's actual meaning from the surrounding labels and context, and rebuild a "
+            "clean table with one label per row/column. If you cannot confidently determine which header a given number belongs to, state "
+            "the number as prose with its label instead of forcing it into an uncertain table cell — never guess a header-to-value pairing.\n"
+            "CRITICAL RULE 3: ANTI-HALLUCINATION GUARD. Do not answer anything not provided in the text.\n\n"
+            "CRITICAL RULE 5: FOLLOW-UP QUESTIONS. After your complete answer, on its own new line, output exactly the delimiter "
+            f"{FOLLOWUP_DELIMITER} followed immediately by a JSON list of exactly 3 short follow-up questions (each under 12 words) "
+            "that the user is likely to ask next, answerable from this same context. Do not repeat the original question. "
+            "Output nothing else after the JSON list — no markdown fences, no commentary. If you cannot think of 3 good follow-ups "
+            f"grounded in this context, output {FOLLOWUP_DELIMITER} followed by an empty JSON list []."
         )
 
         user_prompt = f"Context:\n{context_str}\n\nQuestion: {state['query']}"
         response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
 
+        # One LLM call produces both the answer and the follow-up
+        # suggestions — a second llm.invoke() just for follow-ups would add
+        # a full extra network round-trip to every chat message.
+        answer_text, follow_up_questions = _split_answer_and_followups(response.content)
+
         return {
-            "response": response.content,
-            "chat_history": [f"User: {state['query']}", f"Bot: {response.content}"]
+            "response": answer_text,
+            "chat_history": [f"User: {state['query']}", f"Bot: {answer_text}"],
+            "follow_up_questions": follow_up_questions,
         }
 
     # Build the graph topology

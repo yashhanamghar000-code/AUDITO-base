@@ -42,8 +42,8 @@ export function ChatArea() {
         <>
           <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
             <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-8 pb-40">
-              {messages.map((m) => (
-                <MessageBubble key={m.id} message={m} />
+              {messages.map((m, i) => (
+                <MessageBubble key={m.id} message={m} isLast={i === messages.length - 1} />
               ))}
               <div ref={bottomRef} />
             </div>

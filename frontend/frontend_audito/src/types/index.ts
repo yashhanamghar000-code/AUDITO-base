@@ -6,6 +6,7 @@ export interface Message {
   content: string;
   createdAt: number;
   liked?: boolean | null;
+  followUps?: string[];
 }
 
 export interface Conversation {

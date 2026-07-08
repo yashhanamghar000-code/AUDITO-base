@@ -269,7 +269,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   // Reveals real backend text progressively client-side for a "typing" feel,
   // instead of the old version which streamed pre-canned SAMPLE_REPLIES.
   const revealAssistantText = useCallback(
-    async (conversationId: string, assistantId: string, fullText: string) => {
+    async (conversationId: string, assistantId: string, fullText: string, followUps: string[] = []) => {
       stopRef.current = false;
       setIsStreaming(true);
       const tokens = fullText.split(/(\s+)/);
@@ -289,7 +289,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }
       updateConversation(conversationId, (c) => ({
         ...c,
-        messages: c.messages.map((m) => (m.id === assistantId ? { ...m, content: fullText } : m)),
+        messages: c.messages.map((m) =>
+          m.id === assistantId ? { ...m, content: fullText, followUps } : m,
+        ),
       }));
       setIsStreaming(false);
     },
@@ -326,7 +328,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
       try {
         const res = await chatService.send(text, convId);
-        await revealAssistantText(convId, assistantId, res.data.response);
+        await revealAssistantText(convId, assistantId, res.data.response, res.data.follow_up_questions ?? []);
       } catch (err: any) {
         const detail = err?.response?.data?.detail ?? "Something went wrong reaching the backend.";
         updateConversation(convId, (c) => ({
@@ -362,7 +364,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
       try {
         const res = await chatService.send(prompt, activeId);
-        await revealAssistantText(activeId, assistantId, res.data.response);
+        await revealAssistantText(activeId, assistantId, res.data.response, res.data.follow_up_questions ?? []);
       } catch (err: any) {
         toast.error(err?.response?.data?.detail ?? "Regeneration failed.");
       }

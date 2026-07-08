@@ -15,6 +15,7 @@ export interface ChatResponse {
   status: string;
   response: string;
   sub_queries_used: string[];
+  follow_up_questions: string[];
 }
 
 export interface BackendConversation {
