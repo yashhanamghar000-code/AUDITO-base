@@ -1,0 +1,131 @@
+# AUDITO deployment blueprint for Render.
+#
+# Covers: FastAPI backend, Celery worker, Postgres, Redis (Render Key Value),
+# and the frontend (TanStack Start SSR app).
+#
+# NOT included: Qdrant. Render has no managed vector DB — use Qdrant Cloud
+# (qdrant.tech, free tier is enough to start) and paste its URL/API key when
+# prompted during Blueprint creation. See the deployment notes for details.
+#
+# Usage:
+#   1. Put this file at the ROOT of your repo (same level as backend/, frontend/).
+#   2. In the Render Dashboard: New -> Blueprint -> select this repo.
+#   3. Render will prompt you for every env var marked `sync: false` below.
+
+databases:
+  - name: audito-postgres
+    databaseName: audito_db
+    user: audito_user
+    plan: starter        # free tier Postgres expires after 30 days — use starter for anything real
+
+services:
+  # ---------------------------------------------------------------------
+  # Redis — used as the Celery broker/result backend
+  # ---------------------------------------------------------------------
+  - type: keyvalue
+    name: audito-redis
+    plan: starter
+    ipAllowList: []       # empty = only reachable from other services in this workspace
+
+  # ---------------------------------------------------------------------
+  # Backend API (FastAPI) — needs real memory: sentence-transformers,
+  # cross-encoder reranker, and pdf/OCR libs are all loaded into RAM at
+  # startup. Do NOT use the free plan here — pick at least "Standard".
+  # ---------------------------------------------------------------------
+  - type: web
+    name: audito-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: standard
+    healthCheckPath: /
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: audito-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: audito-redis
+          property: connectionString
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_EXPIRE_MINUTES
+        value: "1440"
+      # --- Qdrant Cloud (create a free cluster at cloud.qdrant.io first) ---
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: QDRANT_COLLECTION_NAME
+        value: audito_documents
+      # --- Azure-hosted LLM (or swap config.py for a different provider) ---
+      - key: MY_API_KEY
+        sync: false
+      - key: AZURE_OPENAI_ENDPOINT
+        sync: false
+      - key: AZURE_LLM_DEPLOYMENT
+        value: Llama-4-Maverick-17B-128E-Instruct-FP8
+      - key: AZURE_OPENAI_API_VERSION
+        value: "2024-02-15-preview"
+
+  # ---------------------------------------------------------------------
+  # Celery worker — same image as the backend, different start command.
+  # No inbound traffic, so it's a "worker", not a "web" service.
+  # ---------------------------------------------------------------------
+  - type: worker
+    name: audito-worker
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: celery -A app.celery_app.celery_app worker --loglevel=info --concurrency=2
+    plan: standard
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: audito-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: audito-redis
+          property: connectionString
+      - key: JWT_SECRET_KEY
+        sync: false   # paste the SAME value Render generated for audito-backend's JWT_SECRET_KEY
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: QDRANT_COLLECTION_NAME
+        value: audito_documents
+      - key: MY_API_KEY
+        sync: false
+      - key: AZURE_OPENAI_ENDPOINT
+        sync: false
+      - key: AZURE_LLM_DEPLOYMENT
+        value: Llama-4-Maverick-17B-128E-Instruct-FP8
+      - key: AZURE_OPENAI_API_VERSION
+        value: "2024-02-15-preview"
+      - key: PARSER_MAX_WORKERS
+        value: "2"
+
+  # ---------------------------------------------------------------------
+  # Frontend (TanStack Start, SSR). Built as a standalone Node server via
+  # Nitro's node_server preset (forced with NITRO_PRESET below, since the
+  # repo's vite config defaults to a Cloudflare target).
+  # ---------------------------------------------------------------------
+  - type: web
+    name: audito-frontend
+    runtime: node
+    rootDir: frontend/frontend_audito
+    buildCommand: npm install && npm run build
+    startCommand: node .output/server/index.mjs
+    plan: starter
+    envVars:
+      - key: NITRO_PRESET
+        value: node_server
+      - key: VITE_API_BASE_URL
+        value: https://audito-backend.onrender.com   # update if you rename the backend service
