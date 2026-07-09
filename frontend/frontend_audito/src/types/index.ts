@@ -7,6 +7,7 @@ export interface Message {
   createdAt: number;
   liked?: boolean | null;
   followUps?: string[];
+  citations?: { source: string; page: number | null; file_id: string | null }[];
 }
 
 export interface Conversation {
@@ -45,6 +46,9 @@ export interface UploadedDoc {
   status: DocStatus;
   progress: number;
   stages: ParsingStage[];
+  // Whether this doc is checked in the sidebar to scope the next question.
+  // true (default) = included; unchecked docs are excluded from retrieval.
+  selected: boolean;
 }
 
 export interface User {

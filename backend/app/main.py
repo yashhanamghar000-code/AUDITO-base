@@ -94,6 +94,7 @@ async def get_chat_history(
 async def upload_document(
     session_id: str = Form(...),
     file: UploadFile = File(...),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -127,19 +128,29 @@ async def upload_document(
                 os.remove(local_file_path)
             raise HTTPException(status_code=422, detail="Uploaded file is empty.")
 
+        # Create the Postgres row UP FRONT (status="processing") so we have
+        # a stable file_id before the worker even starts. This id gets
+        # stamped onto every chunk this file produces, which is what lets
+        # a specific PDF be deleted or selected-for-search later — even if
+        # two uploads share the exact same filename (e.g. two Tata PDFs).
+        file_record = history.create_pending_file(db, current_user.id, session_id, file.filename)
+        file_id = str(file_record.id)
+
         # Dispatch ONLY paths and minimal metadata elements over Redis broker networks
         task = process_document_task.delay(
             local_file_path,
             file.filename,
             user_id,
             session_id,
+            file_id,
         )
 
-        print(f"Enqueued Celery task: {task.id}\n")
+        print(f"Enqueued Celery task: {task.id} (file_id={file_id})\n")
 
         return {
             "status": "queued",
             "task_id": task.id,
+            "file_id": file_id,
         }
 
     except HTTPException:
@@ -179,6 +190,7 @@ async def upload_status(task_id: str, current_user: User = Depends(get_current_u
 async def secure_chat(
     query: str = Form(...),
     session_id: str = Form(...),
+    file_ids: str = Form(None),  # optional comma-separated UploadedFile ids from the sidebar checkboxes; omit/empty = search across all of this user's files
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -191,10 +203,15 @@ async def secure_chat(
         print("Session:", session_id)
         print("Question:", query)
 
+        selected_file_ids = [f.strip() for f in file_ids.split(",") if f.strip()] if file_ids else []
+        if selected_file_ids:
+            print("Restricted to file_ids:", selected_file_ids)
+
         initial_state = {
             "query": query,
             "user_id": user_id,
             "session_id": session_id,
+            "selected_file_ids": selected_file_ids,
             "chat_history": [],
             "sub_queries": [],
             "retrieved_docs": [],
@@ -266,3 +283,41 @@ async def clear_session(
     history.delete_conversation(db, current_user.id, session_id)
 
     return {"status": "success", "detail": f"Session {session_id} cleared for user {user_id}."}
+
+
+# =====================================================
+# SINGLE DOCUMENT DELETE API
+# =====================================================
+# Lets a user remove ONE uploaded file (e.g. one of two Tata PDFs) without
+# clearing the whole chat/session. Distinct from /api/session/{id} above,
+# which wipes an entire conversation's documents + chat history at once.
+
+@app.delete("/api/documents/{file_id}")
+async def delete_document(
+    file_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    user_id = str(current_user.id)
+
+    try:
+        file_id_int = int(file_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid file id.")
+
+    # Ownership check happens inside delete_file_record (join on Conversation.user_id) —
+    # a user can never delete a file that isn't theirs, even by guessing an id.
+    deleted = history.delete_file_record(db, current_user.id, file_id_int)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="File not found.")
+
+    # Wipes this file's chunks from Qdrant (dense) AND rebuilds the BM25
+    # (sparse) cache without them — see MultiUserRetriever.remove_file.
+    MultiUserRetriever.remove_file(user_id, file_id)
+
+    return {
+        "status": "success",
+        "detail": f"'{deleted['file_name']}' removed.",
+        "file_id": file_id,
+        "session_id": deleted["session_id"],
+    }

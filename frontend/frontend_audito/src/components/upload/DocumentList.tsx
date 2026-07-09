@@ -35,13 +35,24 @@ function formatSize(bytes: number) {
 }
 
 function DocItem({ doc }: { doc: UploadedDoc }) {
-  const { removeDocument } = useChat();
+  const { removeDocument, toggleDocumentSelection } = useChat();
   const [open, setOpen] = useState(doc.status !== "indexed");
   const uploading = doc.progress < 100;
 
   return (
     <div className="rounded-lg border border-border bg-card/50 p-2.5">
       <div className="flex items-start gap-2">
+        {/* Checked = included when answering the next question. Lets Sam
+            pick 2 of her 5 uploaded PDFs instead of always searching all of them. */}
+        <input
+          type="checkbox"
+          checked={doc.selected}
+          disabled={doc.status !== "indexed"}
+          onChange={() => toggleDocumentSelection(doc.id)}
+          className="mt-1 h-3.5 w-3.5 shrink-0 accent-primary"
+          aria-label={`Include ${doc.name} in answers`}
+          title={doc.status === "indexed" ? "Include this file when answering" : "Only indexed files can be selected"}
+        />
         <FileText className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -127,6 +138,9 @@ export function DocumentList() {
     <div className="mt-3 space-y-2">
       <div className="px-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
         Documents
+      </div>
+      <div className="px-1 text-[10px] text-muted-foreground">
+        Checked files are used to answer your next question.
       </div>
       <div className="space-y-2">
         {documents.map((d) => (

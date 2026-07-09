@@ -11,11 +11,18 @@ export interface BackendHistoryEntry {
   text: string;
 }
 
+export interface Citation {
+  source: string;
+  page: number | null;
+  file_id: string | null;
+}
+
 export interface ChatResponse {
   status: string;
   response: string;
   sub_queries_used: string[];
   follow_up_questions: string[];
+  citations: Citation[];
 }
 
 export interface BackendConversation {
@@ -48,13 +55,25 @@ export const chatService = {
       `/api/chat/history/${userId}/${sessionId}`,
     ),
 
-  send: (query: string, sessionId: string) => {
+  // fileIds is optional — pass the ids of the documents checked in the
+  // sidebar to restrict the answer to just those files (e.g. Sam picking
+  // 2 of her 5 uploaded PDFs). Omit or pass an empty array to search across
+  // everything she's uploaded, same as before.
+  send: (query: string, sessionId: string, fileIds?: string[]) => {
     const form = new FormData();
     form.append("query", query);
     form.append("session_id", sessionId);
+    if (fileIds && fileIds.length > 0) {
+      form.append("file_ids", fileIds.join(","));
+    }
     return api.post<ChatResponse>("/api/chat", form);
   },
 
   clearSession: (sessionId: string) =>
     api.delete(`/api/session/${sessionId}`),
+
+  // Deletes ONE uploaded document (e.g. one of two Tata PDFs) without
+  // wiping the whole chat — distinct from clearSession above.
+  deleteDocument: (fileId: string) =>
+    api.delete(`/api/documents/${fileId}`),
 };

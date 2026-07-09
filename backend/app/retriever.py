@@ -58,12 +58,14 @@ class MultiUserRetriever:
         return True
 
     @staticmethod
-    def hybrid_search(query: str, user_id: str, session_id: str = None, top_k: int = 5) -> List[Document]:
-        # 1. Dense search via Qdrant, filtered server-side by user_id only —
-        # session_id is accepted for backward compatibility with existing
-        # call sites but is intentionally unused here now.
+    def hybrid_search(query: str, user_id: str, session_id: str = None, top_k: int = 5, file_ids: List[str] = None) -> List[Document]:
+        # 1. Dense search via Qdrant, filtered server-side by user_id (and
+        # optionally file_ids, when the user has selected specific
+        # documents to answer from). session_id is accepted for backward
+        # compatibility with existing call sites but is intentionally
+        # unused as a filter here.
         query_vector = embeddings.embed_query(query)
-        qdrant_hits = qdrant_store.search(query_vector, user_id, top_k=top_k)
+        qdrant_hits = qdrant_store.search(query_vector, user_id, top_k=top_k, file_ids=file_ids)
         dense_results = [
             Document(page_content=hit.payload.get("text", ""), metadata=hit.payload)
             for hit in qdrant_hits
@@ -75,7 +77,12 @@ class MultiUserRetriever:
         if os.path.exists(user_bm25_path):
             with open(user_bm25_path, "rb") as f:
                 bm25_retriever = pickle.load(f)
-                sparse_results = bm25_retriever.invoke(query)[:top_k]
+                raw_sparse = bm25_retriever.invoke(query)
+                # BM25Retriever has no built-in metadata filter, so we
+                # post-filter to the selected file_ids here.
+                if file_ids:
+                    raw_sparse = [d for d in raw_sparse if d.metadata.get("file_id") in file_ids]
+                sparse_results = raw_sparse[:top_k]
 
         # 3. Deduplicate
         seen_contents = set()
@@ -88,8 +95,8 @@ class MultiUserRetriever:
         return combined_results
 
     @staticmethod
-    def retrieve_and_rerank(query: str, user_id: str, session_id: str = None, top_k: int = 5, top_n: int = 3) -> List[Document]:
-        candidate_docs = MultiUserRetriever.hybrid_search(query, user_id, session_id, top_k)
+    def retrieve_and_rerank(query: str, user_id: str, session_id: str = None, top_k: int = 5, top_n: int = 3, file_ids: List[str] = None) -> List[Document]:
+        candidate_docs = MultiUserRetriever.hybrid_search(query, user_id, session_id, top_k, file_ids=file_ids)
         if not candidate_docs:
             return []
 
@@ -115,3 +122,30 @@ class MultiUserRetriever:
         leaving it unaddressed.
         """
         qdrant_store.delete_session_data(user_id, session_id)
+
+    @staticmethod
+    def remove_file(user_id: str, file_id: str) -> None:
+        """
+        Deletes ONE uploaded file's chunks from both the dense (Qdrant) and
+        sparse (BM25) indexes. Unlike clear_session above, this DOES rebuild
+        the user-wide BM25 cache (filtered to drop this file_id) rather than
+        leaving stale entries behind — otherwise a "deleted" PDF would still
+        surface via sparse search until the user's next upload.
+        """
+        qdrant_store.delete_file_data(user_id, file_id)
+
+        user_bm25_path = os.path.join(BM25_CACHE_DIR, f"bm25_{user_id}.pkl")
+        if not os.path.exists(user_bm25_path):
+            return
+
+        with open(user_bm25_path, "rb") as f:
+            bm25_retriever = pickle.load(f)
+
+        remaining_docs = [d for d in bm25_retriever.docs if d.metadata.get("file_id") != file_id]
+
+        if remaining_docs:
+            new_retriever = BM25Retriever.from_documents(remaining_docs)
+            with open(user_bm25_path, "wb") as f:
+                pickle.dump(new_retriever, f)
+        else:
+            os.remove(user_bm25_path)

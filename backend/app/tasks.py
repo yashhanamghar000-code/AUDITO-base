@@ -8,25 +8,27 @@ from app import history
 
 
 @celery_app.task(bind=True, name="app.tasks.process_document_task")
-def process_document_task(self, file_path: str, file_name: str, user_id: str, session_id: str):
+def process_document_task(self, file_path: str, file_name: str, user_id: str, session_id: str, file_id: str):
     try:
         self.update_state(state="PARSING", meta={"stage": "parsing_document"})
 
         # 1. Verify file exists on local scratch disk
         if not os.path.exists(file_path):
+            _update_status(file_id, "failed")
             return {
                 "status": "failed",
                 "detail": f"File not found on worker storage lane: {file_path}",
             }
 
-        print(f"[Tasks] Handing off file path directly to parsing engine: {file_path}")
+        print(f"[Tasks] Handing off file path directly to parsing engine: {file_path} (file_id={file_id})")
 
         # 2. Pass file_path directly down instead of loading raw bytes into RAM
         final_chunks = MultiUserParser.parse_uploaded_stream(
-            file_path=file_path,  # Changed parameter from file_bytes to file_path
+            file_path=file_path,
             file_name=file_name,
             user_id=user_id,
             session_id=session_id,
+            file_id=file_id,
         )
 
         # 3. Safe disk clean up right after extraction is complete
@@ -38,7 +40,7 @@ def process_document_task(self, file_path: str, file_name: str, user_id: str, se
             print(f"Warning: Failed to delete temporary file {file_path}: {cleanup_error}")
 
         if not final_chunks:
-            _record_result(user_id, session_id, file_name, "failed")
+            _update_status(file_id, "failed")
             return {
                 "status": "failed",
                 "detail": "Extraction failed: no content could be mapped.",
@@ -49,19 +51,20 @@ def process_document_task(self, file_path: str, file_name: str, user_id: str, se
         success = MultiUserRetriever.ingest_documents(final_chunks, user_id, session_id)
 
         if not success:
-            _record_result(user_id, session_id, file_name, "failed")
+            _update_status(file_id, "failed")
             return {"status": "failed", "detail": "Vector store ingestion failed."}
 
-        # 5. Permanent record in Postgres — this is what makes the upload
-        #    still show up in the user's history after a restart, instead
-        #    of only existing as vectors in Qdrant with nothing pointing
-        #    back at "this file belongs to this user's session".
-        _record_result(user_id, session_id, file_name, "indexed", len(final_chunks))
+        # 5. Update the Postgres row (created up front in main.py's
+        #    /api/upload, BEFORE this task ran) to "indexed" — this is what
+        #    makes the upload still show up in the user's history after a
+        #    restart, and is the same file_id every chunk was tagged with.
+        _update_status(file_id, "indexed", len(final_chunks))
 
         return {
             "status": "success",
             "total_chunks_indexed": len(final_chunks),
             "file_name": file_name,
+            "file_id": file_id,
         }
 
     except Exception as e:
@@ -73,13 +76,13 @@ def process_document_task(self, file_path: str, file_name: str, user_id: str, se
             except:
                 pass
         try:
-            _record_result(user_id, session_id, file_name, "failed")
+            _update_status(file_id, "failed")
         except Exception:
             pass
         return {"status": "failed", "detail": str(e)}
 
 
-def _record_result(user_id: str, session_id: str, file_name: str, status: str, total_chunks_indexed: int = 0) -> None:
+def _update_status(file_id: str, status: str, total_chunks_indexed: int = 0) -> None:
     """
     The Celery worker is a separate process from FastAPI — there's no
     request-scoped `db: Session = Depends(get_db)` to reuse here, so we
@@ -88,13 +91,6 @@ def _record_result(user_id: str, session_id: str, file_name: str, status: str, t
     """
     db = SessionLocal()
     try:
-        history.record_uploaded_file(
-            db,
-            user_id=int(user_id),
-            session_id=session_id,
-            file_name=file_name,
-            status=status,
-            total_chunks_indexed=total_chunks_indexed,
-        )
+        history.update_file_status(db, int(file_id), status, total_chunks_indexed)
     finally:
         db.close()

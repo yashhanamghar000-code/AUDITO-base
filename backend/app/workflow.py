@@ -18,6 +18,7 @@ class AgentState(TypedDict):
     query: str
     user_id: str          # Tracks multi-tenant execution context
     session_id: str       # Tracks specific chat thread context
+    selected_file_ids: List[str]  # Optional — if set, restricts retrieval to only these UploadedFile ids
     chat_history: Annotated[list, add]
     sub_queries: List[str]
     retrieved_docs: List[Document]
@@ -108,7 +109,8 @@ def build_workflow():
                 query=sub_q,
                 user_id=state["user_id"],
                 session_id=state["session_id"],
-                top_k=TOP_K_PER_QUERY
+                top_k=TOP_K_PER_QUERY,
+                file_ids=state.get("selected_file_ids") or None,
             )
 
             if not candidate_docs:
@@ -175,7 +177,11 @@ def build_workflow():
             key = (d.metadata.get("source"), d.metadata.get("page"))
             if key not in seen_citation_keys:
                 seen_citation_keys.add(key)
-                citations.append({"source": d.metadata.get("source"), "page": d.metadata.get("page")})
+                citations.append({
+                    "source": d.metadata.get("source"),
+                    "page": d.metadata.get("page"),
+                    "file_id": d.metadata.get("file_id"),
+                })
             if len(citations) >= 3:
                 break
 

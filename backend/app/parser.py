@@ -30,23 +30,30 @@ class MultiUserParser:
         file_name: str,
         user_id: str,
         session_id: str,
+        file_id: str,
     ) -> List[Document]:
         """
         Main multi-tenant entry point. Reads from a file on shared disk
         (written by the FastAPI upload endpoint, read by the Celery
         worker) rather than passing raw bytes through the message broker.
+
+        `file_id` is the Postgres UploadedFile.id (as a string), created
+        BEFORE this task runs (see main.py's /api/upload). It gets stamped
+        onto every chunk's metadata below so that later, a specific upload
+        can be deleted or selected-for-search even if another file shares
+        the exact same filename.
         """
         ext = os.path.splitext(file_name)[1].lower()
-        print(f"\n[Parser Gateway] User: {user_id} | Session: {session_id} | Processing: {file_name}")
+        print(f"\n[Parser Gateway] User: {user_id} | Session: {session_id} | File: {file_id} | Processing: {file_name}")
 
         if ext == ".pdf":
-            documents = cls._parse_pdf(file_path, file_name, user_id, session_id)
+            documents = cls._parse_pdf(file_path, file_name, user_id, session_id, file_id)
         elif ext in [".docx", ".doc"]:
-            documents = cls._parse_docx(file_path, file_name, user_id, session_id)
+            documents = cls._parse_docx(file_path, file_name, user_id, session_id, file_id)
         elif ext in [".txt", ".csv", ".md"]:
-            documents = cls._parse_text_file(file_path, file_name, user_id, session_id)
+            documents = cls._parse_text_file(file_path, file_name, user_id, session_id, file_id)
         elif ext in [".png", ".jpg", ".jpeg", ".tiff"]:
-            documents = cls._parse_image_ocr(file_path, file_name, user_id, session_id)
+            documents = cls._parse_image_ocr(file_path, file_name, user_id, session_id, file_id)
         else:
             print(f"Unsupported file format: {ext}")
             return []
@@ -64,7 +71,7 @@ class MultiUserParser:
     # down a file_path instead of in-memory bytes.
     # ------------------------------------------------------------------
     @staticmethod
-    def _parse_page_worker(file_path: str, file_name: str, user_id: str, session_id: str, page_num: int) -> Optional[Document]:
+    def _parse_page_worker(file_path: str, file_name: str, user_id: str, session_id: str, file_id: str, page_num: int) -> Optional[Document]:
         try:
             tables = []
             raw_text = ""
@@ -129,14 +136,15 @@ class MultiUserParser:
                     "has_images": has_images,
                     "user_id": user_id,
                     "session_id": session_id,
+                    "file_id": file_id,
                 },
             )
         except Exception as e:
             print(f"Error processing page {page_num}: {e}")
             return None
-        
+
     @classmethod
-    def _parse_pdf(cls, file_path: str, file_name: str, user_id: str, session_id: str) -> List[Document]:
+    def _parse_pdf(cls, file_path: str, file_name: str, user_id: str, session_id: str, file_id: str) -> List[Document]:
         try:
             from pypdf import PdfReader
             reader = PdfReader(file_path)
@@ -153,13 +161,13 @@ class MultiUserParser:
         # Small documents: skip pool overhead entirely for a 1-2 page file
         if total_pages <= 2 or PARSER_MAX_WORKERS <= 1:
             results = [
-                cls._parse_page_worker(file_path, file_name, user_id, session_id, p)
+                cls._parse_page_worker(file_path, file_name, user_id, session_id, file_id, p)
                 for p in range(1, total_pages + 1)
             ]
             return [r for r in results if r is not None]
 
         # Properly aligned variables for the multi-threaded code execution path
-        worker_fn = partial(cls._parse_page_worker, file_path, file_name, user_id, session_id)
+        worker_fn = partial(cls._parse_page_worker, file_path, file_name, user_id, session_id, file_id)
         page_numbers = list(range(1, total_pages + 1))
         parent_documents: List[Document] = []
 
@@ -176,27 +184,27 @@ class MultiUserParser:
     # Other formats — small enough that per-page parallelism doesn't matter.
     # ------------------------------------------------------------------
     @staticmethod
-    def _parse_docx(file_path: str, file_name: str, user_id: str, session_id: str) -> List[Document]:
+    def _parse_docx(file_path: str, file_name: str, user_id: str, session_id: str, file_id: str) -> List[Document]:
         doc = docx.Document(file_path)
         full_text = [para.text for para in doc.paragraphs if para.text.strip()]
         content = "\n".join(full_text)
 
         return [Document(
             page_content=f"ATTENTION LLM: FILE: '{file_name}'\n" + content,
-            metadata={"source": file_name, "page": 1, "user_id": user_id, "session_id": session_id},
+            metadata={"source": file_name, "page": 1, "user_id": user_id, "session_id": session_id, "file_id": file_id},
         )]
 
     @staticmethod
-    def _parse_text_file(file_path: str, file_name: str, user_id: str, session_id: str) -> List[Document]:
+    def _parse_text_file(file_path: str, file_name: str, user_id: str, session_id: str, file_id: str) -> List[Document]:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
         return [Document(
             page_content=f"ATTENTION LLM: FILE: '{file_name}'\n" + content,
-            metadata={"source": file_name, "page": 1, "user_id": user_id, "session_id": session_id},
+            metadata={"source": file_name, "page": 1, "user_id": user_id, "session_id": session_id, "file_id": file_id},
         )]
 
     @staticmethod
-    def _parse_image_ocr(file_path: str, file_name: str, user_id: str, session_id: str) -> List[Document]:
+    def _parse_image_ocr(file_path: str, file_name: str, user_id: str, session_id: str, file_id: str) -> List[Document]:
         try:
             img = Image.open(file_path)
             text = pytesseract.image_to_string(img)
@@ -207,7 +215,7 @@ class MultiUserParser:
 
         return [Document(
             page_content=f"ATTENTION LLM: IMAGE FILE: '{file_name}'\n[System Note: Text extracted via OCR]\n" + text,
-            metadata={"source": file_name, "page": 1, "is_image": True, "user_id": user_id, "session_id": session_id},
+            metadata={"source": file_name, "page": 1, "is_image": True, "user_id": user_id, "session_id": session_id, "file_id": file_id},
         )]
 
     @classmethod

@@ -7,6 +7,7 @@ import { api } from "./api";
 export interface UploadQueuedResponse {
   status: "queued";
   task_id: string;
+  file_id: string;
 }
 
 export type UploadTaskState =

@@ -38,6 +38,7 @@ interface ChatContextValue {
 
   uploadDocument: (file: File) => Promise<void>;
   removeDocument: (id: string) => void;
+  toggleDocumentSelection: (id: string) => void;
 }
 
 const ChatContext = createContext<ChatContextValue | null>(null);
@@ -215,6 +216,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                 uploadedAt: f.created_at ? new Date(f.created_at).getTime() : Date.now(),
                 status: f.status === "indexed" ? "indexed" : f.status === "failed" ? "failed" : "processing",
                 progress: f.status === "indexed" ? 100 : 0,
+                selected: true,
                 stages: buildStages().map((s) => ({
                   ...s,
                   status: f.status === "indexed" ? ("done" as const) : s.status,
@@ -269,7 +271,13 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   // Reveals real backend text progressively client-side for a "typing" feel,
   // instead of the old version which streamed pre-canned SAMPLE_REPLIES.
   const revealAssistantText = useCallback(
-    async (conversationId: string, assistantId: string, fullText: string, followUps: string[] = []) => {
+    async (
+      conversationId: string,
+      assistantId: string,
+      fullText: string,
+      followUps: string[] = [],
+      citations: { source: string; page: number | null; file_id: string | null }[] = [],
+    ) => {
       stopRef.current = false;
       setIsStreaming(true);
       const tokens = fullText.split(/(\s+)/);
@@ -290,7 +298,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       updateConversation(conversationId, (c) => ({
         ...c,
         messages: c.messages.map((m) =>
-          m.id === assistantId ? { ...m, content: fullText, followUps } : m,
+          m.id === assistantId ? { ...m, content: fullText, followUps, citations } : m,
         ),
       }));
       setIsStreaming(false);
@@ -327,8 +335,21 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }));
 
       try {
-        const res = await chatService.send(text, convId);
-        await revealAssistantText(convId, assistantId, res.data.response, res.data.follow_up_questions ?? []);
+        // Only files currently checked in the sidebar scope this answer —
+        // e.g. Sam picking 2 of her 5 uploaded PDFs before asking. If she's
+        // left everything checked (the default), this is just every
+        // indexed doc, same behavior as before.
+        const fileIds = documents
+          .filter((d) => d.selected && d.status === "indexed")
+          .map((d) => d.id);
+        const res = await chatService.send(text, convId, fileIds);
+        await revealAssistantText(
+          convId,
+          assistantId,
+          res.data.response,
+          res.data.follow_up_questions ?? [],
+          res.data.citations ?? [],
+        );
       } catch (err: any) {
         const detail = err?.response?.data?.detail ?? "Something went wrong reaching the backend.";
         updateConversation(convId, (c) => ({
@@ -338,7 +359,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         toast.error(detail);
       }
     },
-    [activeId, createConversation, revealAssistantText, updateConversation, user],
+    [activeId, createConversation, documents, revealAssistantText, updateConversation, user],
   );
 
   const stopGeneration = useCallback(() => {
@@ -363,13 +384,22 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }));
 
       try {
-        const res = await chatService.send(prompt, activeId);
-        await revealAssistantText(activeId, assistantId, res.data.response, res.data.follow_up_questions ?? []);
+        const fileIds = documents
+          .filter((d) => d.selected && d.status === "indexed")
+          .map((d) => d.id);
+        const res = await chatService.send(prompt, activeId, fileIds);
+        await revealAssistantText(
+          activeId,
+          assistantId,
+          res.data.response,
+          res.data.follow_up_questions ?? [],
+          res.data.citations ?? [],
+        );
       } catch (err: any) {
         toast.error(err?.response?.data?.detail ?? "Regeneration failed.");
       }
     },
-    [activeId, conversations, revealAssistantText, updateConversation, user],
+    [activeId, conversations, documents, revealAssistantText, updateConversation, user],
   );
 
   const reactMessage = useCallback(
@@ -459,44 +489,70 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       let convId = activeId;
       if (!convId) convId = createConversation();
 
-      const docId = crypto.randomUUID();
+      // Temporary client-side id, used only until the backend responds with
+      // the real Postgres file_id (needed below because /api/documents/{id}
+      // delete and /api/chat file_ids selection both expect the REAL
+      // backend id, not a locally-generated one).
+      const tempId = crypto.randomUUID();
       const doc: UploadedDoc = {
-        id: docId,
+        id: tempId,
         name: file.name,
         size: file.size,
         uploadedAt: Date.now(),
         status: "queued",
         progress: 0,
         stages: buildStages(),
+        selected: true,
       };
       setDocuments((prev) => [doc, ...prev]);
 
       try {
         const res = await uploadService.upload(file, convId, (pct) => {
           setDocuments((prev) =>
-            prev.map((d) => (d.id === docId ? { ...d, progress: pct } : d)),
+            prev.map((d) => (d.id === tempId ? { ...d, progress: pct } : d)),
           );
         });
 
+        // Swap the temp id for the real backend file_id now that we have it.
+        const backendFileId = res.data.file_id ?? tempId;
         setDocuments((prev) =>
-          prev.map((d) => (d.id === docId ? { ...d, progress: 100, status: "processing", stages: stagesUpTo(1) } : d)),
+          prev.map((d) =>
+            d.id === tempId
+              ? { ...d, id: backendFileId, progress: 100, status: "processing", stages: stagesUpTo(1) }
+              : d,
+          ),
         );
 
-        pollUploadStatus(docId, res.data.task_id, convId);
+        pollUploadStatus(backendFileId, res.data.task_id, convId);
       } catch (err: any) {
-        setDocuments((prev) => prev.map((d) => (d.id === docId ? { ...d, status: "failed" } : d)));
+        setDocuments((prev) => prev.map((d) => (d.id === tempId ? { ...d, status: "failed" } : d)));
         toast.error(err?.response?.data?.detail ?? "Upload failed.");
       }
     },
     [activeId, createConversation, pollUploadStatus, user],
   );
 
-  const removeDocument = useCallback((id: string) => {
-    // Local-only: the backend has no per-document delete endpoint, only a
-    // whole-session clear (see deleteConversation). This just hides it from
-    // the sidebar; the underlying vectors remain indexed under the session
-    // until the whole conversation/session is deleted.
-    setDocuments((prev) => prev.filter((d) => d.id !== id));
+  const removeDocument = useCallback(
+    (id: string) => {
+      // Optimistically remove from the sidebar immediately, then delete
+      // for real on the backend — this actually removes the file's
+      // chunks from Qdrant + BM25 (see MultiUserRetriever.remove_file),
+      // not just hides it in the UI like before.
+      setDocuments((prev) => prev.filter((d) => d.id !== id));
+      chatService.deleteDocument(id).catch((err: any) => {
+        toast.error(err?.response?.data?.detail ?? "Failed to delete document on the server.");
+      });
+    },
+    [],
+  );
+
+  // Toggles whether a document is included when answering the next
+  // question — lets Sam pick 2 of her 5 uploaded PDFs instead of always
+  // searching everything she's uploaded.
+  const toggleDocumentSelection = useCallback((id: string) => {
+    setDocuments((prev) =>
+      prev.map((d) => (d.id === id ? { ...d, selected: !d.selected } : d)),
+    );
   }, []);
 
   const value: ChatContextValue = {
@@ -515,6 +571,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     reactMessage,
     uploadDocument,
     removeDocument,
+    toggleDocumentSelection,
   };
 
   return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>;

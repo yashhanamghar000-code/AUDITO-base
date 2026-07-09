@@ -2,7 +2,7 @@ import os
 import uuid
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import (
-    Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, PayloadSchemaType
+    Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, MatchAny, PayloadSchemaType
 )
 from qdrant_client.http.exceptions import UnexpectedResponse
 from dotenv import load_dotenv
@@ -40,7 +40,7 @@ def _ensure_payload_indexes():
     re-creating an existing index is a no-op on Qdrant's side, and we
     swallow the error if the client raises on a duplicate anyway.
     """
-    for field_name in ("user_id", "session_id"):
+    for field_name in ("user_id", "session_id", "file_id"):
         try:
             client.create_payload_index(
                 collection_name=COLLECTION_NAME,
@@ -74,15 +74,14 @@ def upsert_chunks(texts, vectors, metadatas, user_id: str, session_id: str, batc
         client.upsert(collection_name=COLLECTION_NAME, points=points[i:i + batch_size])
 
 
-def search(query_vector, user_id: str, top_k: int = 5):
-    # user_id only — this is the deliberate change that makes documents
-    # uploaded in ANY of a user's chats retrievable from EVERY chat, not
-    # just the one they were originally uploaded in.
-    qfilter = Filter(
-        must=[
-            FieldCondition(key="user_id", match=MatchValue(value=user_id)),
-        ]
-    )
+def search(query_vector, user_id: str, top_k: int = 5, file_ids: list[str] | None = None):
+    # user_id is always required. file_ids is optional — pass a list of
+    # UploadedFile ids (as strings) to restrict this search to only those
+    # documents (Sam picking 2 of her 5 uploaded PDFs before asking).
+    must = [FieldCondition(key="user_id", match=MatchValue(value=user_id))]
+    if file_ids:
+        must.append(FieldCondition(key="file_id", match=MatchAny(any=file_ids)))
+    qfilter = Filter(must=must)
     response = client.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
@@ -98,6 +97,18 @@ def delete_session_data(user_id: str, session_id: str):
         must=[
             FieldCondition(key="user_id", match=MatchValue(value=user_id)),
             FieldCondition(key="session_id", match=MatchValue(value=session_id)),
+        ]
+    )
+    client.delete(collection_name=COLLECTION_NAME, points_selector=qfilter)
+
+
+def delete_file_data(user_id: str, file_id: str):
+    """Wipes only the vectors belonging to ONE uploaded file (e.g. one of
+    Sam's two Tata PDFs), leaving her other files in this session/chat intact."""
+    qfilter = Filter(
+        must=[
+            FieldCondition(key="user_id", match=MatchValue(value=user_id)),
+            FieldCondition(key="file_id", match=MatchValue(value=file_id)),
         ]
     )
     client.delete(collection_name=COLLECTION_NAME, points_selector=qfilter)

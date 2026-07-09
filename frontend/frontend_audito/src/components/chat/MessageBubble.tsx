@@ -121,6 +121,22 @@ export function MessageBubble({ message, isLast }: { message: Message; isLast?: 
           )}
         </div>
 
+        {!isUser && !!message.citations?.length && (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Sources:</span>
+            {message.citations.map((c, i) => (
+              <span
+                key={i}
+                className="rounded-full border border-border bg-muted/40 px-2 py-0.5 text-[10px] text-foreground/80"
+                title={c.source ?? undefined}
+              >
+                {c.source ?? "Unknown"}
+                {c.page != null ? ` · p.${c.page}` : ""}
+              </span>
+            ))}
+          </div>
+        )}
+
         {!isUser && message.content && (
           <div className="mt-1.5 flex items-center gap-0.5 opacity-70 transition-opacity hover:opacity-100">
             <IconAction label="Copy" onClick={copyAll}>

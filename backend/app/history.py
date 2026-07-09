@@ -100,6 +100,61 @@ def record_uploaded_file(db: Session, user_id: int, session_id: str, file_name: 
     db.commit()
 
 
+def create_pending_file(db: Session, user_id: int, session_id: str, file_name: str) -> UploadedFile:
+    """
+    Creates the UploadedFile row BEFORE Celery processes it (previously this
+    only happened after processing finished). This gives us a stable
+    Postgres id up front — that id is what gets stamped onto every chunk
+    this file produces (as `file_id` in Qdrant/BM25 metadata), which is what
+    lets a user delete or select ONE specific PDF later, even if two PDFs
+    share the exact same filename (e.g. two "annual_report.pdf" uploads).
+    """
+    conv = get_or_create_conversation(db, user_id, session_id, title_hint=file_name)
+    f = UploadedFile(
+        conversation_id=conv.id,
+        user_id=user_id,
+        file_name=file_name,
+        status="processing",
+        total_chunks_indexed=0,
+    )
+    db.add(f)
+    db.commit()
+    db.refresh(f)
+    return f
+
+
+def update_file_status(db: Session, file_id: int, status: str, total_chunks_indexed: int = 0) -> None:
+    """Called by the Celery worker (tasks.py) once parsing/embedding finishes."""
+    f = db.query(UploadedFile).filter(UploadedFile.id == file_id).first()
+    if f:
+        f.status = status
+        f.total_chunks_indexed = total_chunks_indexed
+        db.commit()
+
+
+def get_file(db: Session, user_id: int, file_id: int) -> UploadedFile | None:
+    """Ownership-checked lookup — a user can only ever fetch their own files."""
+    return (
+        db.query(UploadedFile)
+        .join(Conversation, UploadedFile.conversation_id == Conversation.id)
+        .filter(UploadedFile.id == file_id, Conversation.user_id == user_id)
+        .first()
+    )
+
+
+def delete_file_record(db: Session, user_id: int, file_id: int) -> dict | None:
+    """Deletes the Postgres row for one file. Returns {file_name, session_id}
+    (captured before deletion) so the caller can still use them after commit,
+    or None if the file didn't exist or didn't belong to this user."""
+    f = get_file(db, user_id, file_id)
+    if not f:
+        return None
+    info = {"file_name": f.file_name, "session_id": f.conversation.session_id}
+    db.delete(f)
+    db.commit()
+    return info
+
+
 def delete_conversation(db: Session, user_id: int, session_id: str) -> None:
     conv = db.query(Conversation).filter(
         Conversation.session_id == session_id, Conversation.user_id == user_id
