@@ -23,6 +23,7 @@ class AgentState(TypedDict):
     retrieved_docs: List[Document]
     response: str
     follow_up_questions: List[str]
+    citations: List[dict]
 
 
 def decompose_query(query: str, chat_history: List[str]) -> List[str]:
@@ -30,6 +31,11 @@ def decompose_query(query: str, chat_history: List[str]) -> List[str]:
     decomposition_prompt = (
         "You are an advanced Query Rewriter and Decomposition engine optimized for dense financial data retrieval.\n"
         "Your task is to produce 1 to 3 optimized search queries for analyzing financial annual reports based on the user question.\n\n"
+        "CRITICAL: If the question compares, contrasts, or asks about MULTIPLE named entities/companies "
+        "(e.g. 'compare Tata and Mahindra', 'net profit for both companies'), you MUST generate one separate "
+        "sub-query PER entity, each explicitly naming that entity (e.g. 'Tata Motors net profit', "
+        "'Mahindra net profit') — never a single merged query that risks one entity's data being outranked "
+        "and dropped entirely from the retrieved context.\n\n"
         "OUTPUT REQUIREMENT:\nReturn ONLY a JSON list of strings, nothing else. Do not wrap it in markdown fences.\n\n"
         f"Chat History:\n{history_str}\n\nRaw User Input: {query}"
     )
@@ -89,7 +95,11 @@ def build_workflow():
 
     def retrieve_node(state: AgentState):
         print(f"[Workflow] Stage 1: Executing multi-doc hybrid search loop...")
-        all_final_docs = []
+        # Grouped by source document, not a flat list — this is what lets us
+        # guarantee every document represented in this session gets a fair
+        # shot at the final context, instead of whichever sub-query happened
+        # to run first (or scored marginally higher) taking every slot.
+        docs_by_source: dict = {}
         seen = set()
 
         for sub_q in state["sub_queries"]:
@@ -116,7 +126,26 @@ def build_workflow():
                 key = (doc.metadata.get("source"), doc.metadata.get("page"), doc.page_content[:80])
                 if key not in seen:
                     seen.add(key)
-                    all_final_docs.append(doc)
+                    src = doc.metadata.get("source", "unknown")
+                    docs_by_source.setdefault(src, []).append(doc)
+
+        # Round-robin across sources (one doc from each source per round,
+        # each source's docs kept in their own relevance order) instead of
+        # a flat concatenation — this is the actual fix for "asking about
+        # Tata sometimes returns nothing" when Mahindra is also in this
+        # session: a flat list biased toward whichever document had more/
+        # higher-scoring chunks would get truncated to all-Mahindra before
+        # a comparative query's Tata chunks ever got a chance.
+        all_final_docs = []
+        sources = list(docs_by_source.keys())
+        idx = 0
+        while any(docs_by_source.values()):
+            src = sources[idx % len(sources)]
+            if docs_by_source[src]:
+                all_final_docs.append(docs_by_source[src].pop(0))
+            idx += 1
+            if idx > 10000:  # safety valve, should never trigger
+                break
 
         all_final_docs = all_final_docs[:MAX_TOTAL_CONTEXT_DOCS]
         if all_final_docs:
@@ -129,12 +158,26 @@ def build_workflow():
                 "response": "Data could not be localized within any current report segments.",
                 "chat_history": [],
                 "follow_up_questions": [],
+                "citations": [],
             }
 
         context_blocks = []
         for i, d in enumerate(state["retrieved_docs"], start=1):
             context_blocks.append(f"[CHUNK {i} | Source: {d.metadata.get('source')} | Page: {d.metadata.get('page')}]\n{d.page_content}")
         context_str = "\n\n".join(context_blocks)
+
+        # Top 3 unique (source, page) pairs, in the order retrieved_docs is
+        # already sorted (interleaved-then-reranked relevance order) — this
+        # is what the frontend needs to show "Sources: FileX p.12, p.45..."
+        citations = []
+        seen_citation_keys = set()
+        for d in state["retrieved_docs"]:
+            key = (d.metadata.get("source"), d.metadata.get("page"))
+            if key not in seen_citation_keys:
+                seen_citation_keys.add(key)
+                citations.append({"source": d.metadata.get("source"), "page": d.metadata.get("page")})
+            if len(citations) >= 3:
+                break
 
         system_prompt = (
             "You are an expert precision financial and legal auditor. Your task is to answer the user's question with absolute data integrity.\n"
@@ -152,6 +195,8 @@ def build_workflow():
             "structure verbatim. Instead: identify each data value's actual meaning from the surrounding labels and context, and rebuild a "
             "clean table with one label per row/column. If you cannot confidently determine which header a given number belongs to, state "
             "the number as prose with its label instead of forcing it into an uncertain table cell — never guess a header-to-value pairing.\n"
+            "NEVER copy a chunk's raw '| ... | ... |' markdown syntax directly into your answer unedited — always reformat into a clean "
+            "table of your own construction, using only the labels and values you can confidently pair.\n"
             "CRITICAL RULE 3: ANTI-HALLUCINATION GUARD. Do not answer anything not provided in the text.\n\n"
             "CRITICAL RULE 5: FOLLOW-UP QUESTIONS. After your complete answer, on its own new line, output exactly the delimiter "
             f"{FOLLOWUP_DELIMITER} followed immediately by a JSON list of exactly 3 short follow-up questions (each under 12 words) "
@@ -172,6 +217,7 @@ def build_workflow():
             "response": answer_text,
             "chat_history": [f"User: {state['query']}", f"Bot: {answer_text}"],
             "follow_up_questions": follow_up_questions,
+            "citations": citations,
         }
 
     # Build the graph topology

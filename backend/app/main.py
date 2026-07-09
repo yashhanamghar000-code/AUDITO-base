@@ -200,6 +200,7 @@ async def secure_chat(
             "retrieved_docs": [],
             "response": "",
             "follow_up_questions": [],
+            "citations": [],
         }
 
         print("STEP 1 - Running LangGraph")
@@ -232,6 +233,10 @@ async def secure_chat(
             ),
             "follow_up_questions": final_output.get(
                 "follow_up_questions",
+                []
+            ),
+            "citations": final_output.get(
+                "citations",
                 []
             ),
         }

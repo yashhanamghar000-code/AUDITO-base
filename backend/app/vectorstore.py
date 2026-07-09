@@ -74,11 +74,13 @@ def upsert_chunks(texts, vectors, metadatas, user_id: str, session_id: str, batc
         client.upsert(collection_name=COLLECTION_NAME, points=points[i:i + batch_size])
 
 
-def search(query_vector, user_id: str, session_id: str, top_k: int = 5):
+def search(query_vector, user_id: str, top_k: int = 5):
+    # user_id only — this is the deliberate change that makes documents
+    # uploaded in ANY of a user's chats retrievable from EVERY chat, not
+    # just the one they were originally uploaded in.
     qfilter = Filter(
         must=[
             FieldCondition(key="user_id", match=MatchValue(value=user_id)),
-            FieldCondition(key="session_id", match=MatchValue(value=session_id)),
         ]
     )
     response = client.query_points(
