@@ -18,7 +18,6 @@ class AgentState(TypedDict):
     query: str
     user_id: str          # Tracks multi-tenant execution context
     session_id: str       # Tracks specific chat thread context
-    selected_file_ids: List[str]  # Optional — if set, restricts retrieval to only these UploadedFile ids
     chat_history: Annotated[list, add]
     sub_queries: List[str]
     retrieved_docs: List[Document]
@@ -109,8 +108,7 @@ def build_workflow():
                 query=sub_q,
                 user_id=state["user_id"],
                 session_id=state["session_id"],
-                top_k=TOP_K_PER_QUERY,
-                file_ids=state.get("selected_file_ids") or None,
+                top_k=TOP_K_PER_QUERY
             )
 
             if not candidate_docs:
@@ -177,11 +175,7 @@ def build_workflow():
             key = (d.metadata.get("source"), d.metadata.get("page"))
             if key not in seen_citation_keys:
                 seen_citation_keys.add(key)
-                citations.append({
-                    "source": d.metadata.get("source"),
-                    "page": d.metadata.get("page"),
-                    "file_id": d.metadata.get("file_id"),
-                })
+                citations.append({"source": d.metadata.get("source"), "page": d.metadata.get("page")})
             if len(citations) >= 3:
                 break
 
@@ -204,6 +198,15 @@ def build_workflow():
             "NEVER copy a chunk's raw '| ... | ... |' markdown syntax directly into your answer unedited — always reformat into a clean "
             "table of your own construction, using only the labels and values you can confidently pair.\n"
             "CRITICAL RULE 3: ANTI-HALLUCINATION GUARD. Do not answer anything not provided in the text.\n\n"
+            "CRITICAL RULE 6: NO INTERNAL LEAKAGE. The words 'CHUNK', 'chunk', 'context', 'the provided context', 'the given information', "
+            "'the provided text', and any [CHUNK N | Source: ... | Page: ...] labels are internal retrieval scaffolding for YOUR reference "
+            "only — the user must NEVER see them. Never write phrases like 'According to CHUNK 3' or 'based on the provided context' or "
+            "'reviewing the provided chunks'. Instead write as if you personally read the full report — e.g. 'The report states...', "
+            "'According to the FY24 annual report...', or just state the fact directly with no meta-reference to how you found it.\n"
+            "CRITICAL RULE 7: DIRECT ANSWER STYLE. Do not narrate your search process (e.g. 'To answer this, we need to look at...', "
+            "'Let's check if this matches...', 'Upon reviewing...'). Give the final answer directly and confidently. If the answer isn't "
+            "available, say so in one concise sentence (e.g. 'The report doesn't specify this figure.') — do not walk through a multi-step "
+            "process of what you tried and failed to find before concluding that.\n\n"
             "CRITICAL RULE 5: FOLLOW-UP QUESTIONS. After your complete answer, on its own new line, output exactly the delimiter "
             f"{FOLLOWUP_DELIMITER} followed immediately by a JSON list of exactly 3 short follow-up questions (each under 12 words) "
             "that the user is likely to ask next, answerable from this same context. Do not repeat the original question. "

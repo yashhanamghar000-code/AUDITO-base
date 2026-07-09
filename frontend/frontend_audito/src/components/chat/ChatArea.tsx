@@ -4,9 +4,20 @@ import { AuditoLogo } from "@/components/brand/AuditoLogo";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { MessageBubble } from "@/components/chat/MessageBubble";
 import { useChat } from "@/contexts/ChatContext";
+import { useAuth } from "@/contexts/AuthContext";
+
+function getGreeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 5) return "Working late";
+  if (hour < 12) return "Good morning";
+  if (hour < 17) return "Good afternoon";
+  if (hour < 21) return "Good evening";
+  return "Working late";
+}
 
 export function ChatArea() {
   const { activeConversation, isStreaming } = useChat();
+  const { user } = useAuth();
   const bottomRef = useRef<HTMLDivElement>(null);
   const messages = activeConversation?.messages ?? [];
 
@@ -15,6 +26,7 @@ export function ChatArea() {
   }, [messages.length, isStreaming, messages]);
 
   const empty = messages.length === 0;
+  const firstName = user?.name?.split(" ")[0];
 
   return (
     <div className="relative flex h-full flex-col">
@@ -28,7 +40,7 @@ export function ChatArea() {
           >
             <AuditoLogo className="h-16 w-16" />
             <h1 className="mt-5 text-2xl font-semibold tracking-tight md:text-3xl">
-              AUDITO AI
+              {getGreeting()}{firstName ? `, ${firstName}` : ""}
             </h1>
             <p className="mt-2 text-sm text-muted-foreground md:text-base">
               What would you like to audit today?
