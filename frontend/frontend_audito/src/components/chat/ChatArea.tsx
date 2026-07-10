@@ -43,7 +43,7 @@ export function ChatArea() {
               {getGreeting()}{firstName ? `, ${firstName}` : ""}
             </h1>
             <p className="mt-2 text-sm text-muted-foreground md:text-base">
-              What would you like to audit today?
+              What would you like to do today?
             </p>
           </motion.div>
           <div className="mt-8 w-full max-w-2xl">

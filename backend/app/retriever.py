@@ -79,9 +79,12 @@ class MultiUserRetriever:
                 bm25_retriever = pickle.load(f)
                 raw_sparse = bm25_retriever.invoke(query)
                 # BM25Retriever has no built-in metadata filter, so we
-                # post-filter to the selected file_ids here.
+                # post-filter to the selected file_ids here. Cast both sides
+                # to str so this can't silently miss matches if a file_id
+                # ever ends up as an int somewhere upstream.
                 if file_ids:
-                    raw_sparse = [d for d in raw_sparse if d.metadata.get("file_id") in file_ids]
+                    wanted = {str(f) for f in file_ids}
+                    raw_sparse = [d for d in raw_sparse if str(d.metadata.get("file_id")) in wanted]
                 sparse_results = raw_sparse[:top_k]
 
         # 3. Deduplicate

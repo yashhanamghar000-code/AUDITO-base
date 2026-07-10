@@ -2,7 +2,7 @@ import os
 import uuid
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import (
-    Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, MatchAny, PayloadSchemaType
+    Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, MatchAny, PayloadSchemaType, SearchParams
 )
 from qdrant_client.http.exceptions import UnexpectedResponse
 from dotenv import load_dotenv
@@ -80,13 +80,29 @@ def search(query_vector, user_id: str, top_k: int = 5, file_ids: list[str] | Non
     # documents (Sam picking 2 of her 5 uploaded PDFs before asking).
     must = [FieldCondition(key="user_id", match=MatchValue(value=user_id))]
     if file_ids:
-        must.append(FieldCondition(key="file_id", match=MatchAny(any=file_ids)))
+        must.append(FieldCondition(key="file_id", match=MatchAny(any=[str(f) for f in file_ids])))
     qfilter = Filter(must=must)
+
+    # BUG FIX: Qdrant's default vector search is APPROXIMATE (HNSW). With no
+    # filter (checkbox unticked -> search every file), the candidate pool is
+    # large enough that the right chunks are found anyway. But once a
+    # file_id filter narrows the pool (checkbox ticked -> restrict to 1-2
+    # files), HNSW's graph walk can finish before it ever reaches a node
+    # that satisfies the filter, silently returning few/zero points even
+    # though the data is indexed correctly. This is exactly the "ticking
+    # the box makes the answer worse" symptom.
+    # Forcing exact=True does a real filtered scan instead of the
+    # approximate graph walk, so filtered results are as reliable as
+    # unfiltered ones. This only kicks in when a filter is actually
+    # applied, so unfiltered (all-files) search keeps its normal ANN speed.
+    search_params = SearchParams(exact=True) if file_ids else None
+
     response = client.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
         query_filter=qfilter,
         limit=top_k,
+        search_params=search_params,
     )
     return response.points
 
