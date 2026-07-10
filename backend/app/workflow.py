@@ -24,6 +24,7 @@ class AgentState(TypedDict):
     response: str
     follow_up_questions: List[str]
     citations: List[dict]
+    selected_file_ids: List[str]
 
 
 def decompose_query(query: str, chat_history: List[str]) -> List[str]:
@@ -102,13 +103,20 @@ def build_workflow():
         docs_by_source: dict = {}
         seen = set()
 
+        # Sidebar checkbox selection — when the user has checked specific
+        # documents, every sub-query's retrieval is restricted to just
+        # those files. Empty/absent = search across all of this user's
+        # documents (the default, unrestricted behavior).
+        selected_file_ids = state.get("selected_file_ids") or None
+
         for sub_q in state["sub_queries"]:
             # Uses our secure, isolated retriever method per sub-query
             candidate_docs = MultiUserRetriever.hybrid_search(
                 query=sub_q,
                 user_id=state["user_id"],
                 session_id=state["session_id"],
-                top_k=TOP_K_PER_QUERY
+                top_k=TOP_K_PER_QUERY,
+                file_ids=selected_file_ids,
             )
 
             if not candidate_docs:
