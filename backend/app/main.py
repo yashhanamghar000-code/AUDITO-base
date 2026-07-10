@@ -305,15 +305,37 @@ async def delete_document(
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid file id.")
 
-    # Ownership check happens inside delete_file_record (join on Conversation.user_id) —
-    # a user can never delete a file that isn't theirs, even by guessing an id.
+    # Ownership check up front — a user can never delete a file that isn't
+    # theirs, even by guessing an id. This only reads/verifies, it doesn't
+    # delete anything yet.
+    owned_file = history.get_file(db, current_user.id, file_id_int)
+    if not owned_file:
+        raise HTTPException(status_code=404, detail="File not found.")
+
+    # BUG FIX: this used to delete the Postgres row FIRST and wipe the
+    # Qdrant/BM25 vectors AFTER. If the vector cleanup step ever failed
+    # (timeout, a concurrent upload holding the BM25 cache file, a worker
+    # restart, etc.), the Postgres row was already gone — the file
+    # disappeared from the UI with no way to ever select or delete it
+    # again, while its chunks stayed orphaned in Qdrant/BM25 forever and
+    # kept surfacing in every future answer. ("I deleted it but the answer
+    # still uses it.")
+    #
+    # Fixed order: wipe the actual vector data FIRST (and let it raise if
+    # it fails), and only delete the Postgres row — which is what makes
+    # the file vanish from the UI — once that has actually succeeded.
+    try:
+        MultiUserRetriever.remove_file(user_id, file_id)
+    except Exception as e:
+        print(f"[Delete] Failed to purge vectors for file_id={file_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not fully remove this file's data. Please try again.",
+        )
+
     deleted = history.delete_file_record(db, current_user.id, file_id_int)
     if not deleted:
         raise HTTPException(status_code=404, detail="File not found.")
-
-    # Wipes this file's chunks from Qdrant (dense) AND rebuilds the BM25
-    # (sparse) cache without them — see MultiUserRetriever.remove_file.
-    MultiUserRetriever.remove_file(user_id, file_id)
 
     return {
         "status": "success",

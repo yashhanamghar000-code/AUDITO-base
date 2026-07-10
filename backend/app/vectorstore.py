@@ -115,7 +115,10 @@ def delete_session_data(user_id: str, session_id: str):
             FieldCondition(key="session_id", match=MatchValue(value=session_id)),
         ]
     )
-    client.delete(collection_name=COLLECTION_NAME, points_selector=qfilter)
+    # wait=True so this call doesn't return until Qdrant has actually applied
+    # the delete — without it, a caller that immediately re-searches (or
+    # deletes the Postgres row right after) can race ahead of the deletion.
+    client.delete(collection_name=COLLECTION_NAME, points_selector=qfilter, wait=True)
 
 
 def delete_file_data(user_id: str, file_id: str):
@@ -127,4 +130,9 @@ def delete_file_data(user_id: str, file_id: str):
             FieldCondition(key="file_id", match=MatchValue(value=file_id)),
         ]
     )
-    client.delete(collection_name=COLLECTION_NAME, points_selector=qfilter)
+    # wait=True — see delete_session_data. This one matters even more: the
+    # caller (MultiUserRetriever.remove_file) must know these vectors are
+    # actually gone before the Postgres file record is deleted, or a
+    # deleted file's chunks can be left orphaned in Qdrant forever with no
+    # UI record left to ever delete them again.
+    client.delete(collection_name=COLLECTION_NAME, points_selector=qfilter, wait=True)
