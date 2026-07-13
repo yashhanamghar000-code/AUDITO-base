@@ -1,19 +1,55 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Menu, X } from "lucide-react";
+import { Menu, X, PanelLeft } from "lucide-react";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { AuditoWordmark } from "@/components/brand/AuditoLogo";
+
+const SIDEBAR_STATE_KEY = "audito_sidebar_open";
 
 export function ChatLayout({ children }: { children: ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  // Device-level UI preference, not per-user data — plain localStorage is
+  // fine here (unlike auth/chat data, there's nothing sensitive or
+  // user-specific about whether the sidebar happens to be collapsed).
+  const [desktopOpen, setDesktopOpen] = useState(() => {
+    const stored = window.localStorage.getItem(SIDEBAR_STATE_KEY);
+    return stored === null ? true : stored === "true";
+  });
+
+  useEffect(() => {
+    window.localStorage.setItem(SIDEBAR_STATE_KEY, String(desktopOpen));
+  }, [desktopOpen]);
+
+  // Ctrl+. (or Cmd+. on Mac) toggles the sidebar, matching the shortcut
+  // shown in Claude's own sidebar-toggle tooltip.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === ".") {
+        e.preventDefault();
+        setDesktopOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-background text-foreground">
-      {/* Desktop sidebar */}
-      <aside className="hidden shrink-0 border-r border-sidebar-border bg-sidebar md:block md:w-[300px]">
-        <Sidebar />
-      </aside>
+      {/* Desktop sidebar — collapses to width 0 instead of unmounting, so
+          the slide animation has something to animate from/to. */}
+      <motion.aside
+        initial={false}
+        animate={{ width: desktopOpen ? 300 : 0 }}
+        transition={{ type: "spring", damping: 28, stiffness: 260 }}
+        className="hidden shrink-0 overflow-hidden border-r border-sidebar-border bg-sidebar md:block"
+        style={{ borderRightWidth: desktopOpen ? 1 : 0 }}
+      >
+        <div className="h-full w-[300px]">
+          <Sidebar />
+        </div>
+      </motion.aside>
 
       {/* Mobile drawer */}
       <AnimatePresence>
@@ -48,6 +84,30 @@ export function ChatLayout({ children }: { children: ReactNode }) {
           <AuditoWordmark />
           <div className="w-9" />
         </div>
+
+        {/* Desktop sidebar toggle — sits at the top-left of the main
+            content area so it stays reachable even when the sidebar is
+            fully collapsed, same placement as Claude's own toggle. */}
+        <div className="hidden h-12 shrink-0 items-center px-3 md:flex">
+          <TooltipProvider delayDuration={200}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setDesktopOpen((prev) => !prev)}
+                  aria-label={desktopOpen ? "Close sidebar" : "Open sidebar"}
+                >
+                  <PanelLeft className="h-5 w-5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                {desktopOpen ? "Close sidebar" : "Open sidebar"}
+                <span className="ml-1.5 text-muted-foreground">Ctrl+.</span>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>        </div>
+
         <main className="min-h-0 flex-1">{children}</main>
       </div>
     </div>
