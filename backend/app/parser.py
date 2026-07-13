@@ -65,10 +65,11 @@ class MultiUserParser:
         return cls._chunk_documents(documents, file_name, user_id, session_id)
 
     # ------------------------------------------------------------------
-    # PDF — parallelized across CPU cores, one process per page batch.
-    # Each worker re-opens the file from disk by path (file handles can't
-    # cross process boundaries), which is exactly why tasks.py now hands
-    # down a file_path instead of in-memory bytes.
+    # PDF — parallelized across CPU cores, one thread per page batch.
+    # Each worker re-opens the file from disk by path (file handles/state
+    # can't be safely shared across threads once we start mutating page
+    # rotation), which is why every helper below opens its own handles
+    # instead of sharing one from the caller.
     # ------------------------------------------------------------------
     @staticmethod
     def _parse_page_worker(file_path: str, file_name: str, user_id: str, session_id: str, file_id: str, page_num: int) -> Optional[Document]:
@@ -76,26 +77,93 @@ class MultiUserParser:
             tables = []
             raw_text = ""
             image_summary_context = ""
+            used_fallback = False
+            needs_forced_rotation = False
+            has_images = False
 
+            # --- STEP 1: pdfplumber pass — layout inspection + normal extraction ---
             with pdfplumber.open(file_path) as pdf:
                 if page_num > len(pdf.pages):
                     return None
                 page = pdf.pages[page_num - 1]
 
-                has_images = False
-                if hasattr(page, "images") and hasattr(page, "rects"):
-                    has_images = len(page.images) > 0 or len(page.rects) > 15
-                if has_images:
-                    image_summary_context = "\n[Visual Content Note: Page contains embedded visual layers.]"
-
+                # --- GLOBAL PROTECTION FOR PDFPLUMBER LAYOUT CRASHES ---
                 try:
-                    tables = page.extract_tables()
-                    raw_text = page.extract_text() or ""
-                except Exception:
-                    pass
+                    has_images = len(page.images) > 0 or len(page.rects) > 15
+                    if has_images:
+                        image_summary_context = "\n[Visual Content Note: Page contains embedded visual layers.]"
 
-            # OCR fallback only when extracted text is genuinely poor/missing —
-            # this is the expensive path, so most pages skip it entirely.
+                    # Quick orientation check — landscape-shaped page is often
+                    # a rotated portrait page (common in financial-report scans/exports).
+                    if page.width > page.height:
+                        needs_forced_rotation = True
+                    else:
+                        chars = page.chars
+                        if chars and len(chars) > 100:
+                            sampled_chars = chars[::20]
+                            vertical_chars = sum(
+                                1 for c in sampled_chars
+                                if c.get("orientation") in ["up", "down"] or c.get("upright") == 0
+                            )
+                            if vertical_chars / len(sampled_chars) > 0.30:
+                                needs_forced_rotation = True
+                except Exception:
+                    # If pdfplumber trips on a layout/index error, skip straight
+                    # to the pypdf rotation-normalized path below.
+                    needs_forced_rotation = False
+                    used_fallback = True
+
+                # --- STEP 2: NATIVE ROTATION CHECK + CORRECTION VIA PYPDF ---
+                # NOTE: we open a fresh PdfReader here (rather than sharing one
+                # across threads) because pypdf_page.rotate() mutates page
+                # state. Sharing a single reader across ThreadPoolExecutor
+                # workers risks one thread's rotation call bleeding into
+                # another thread's page. The extra open() is cheap relative
+                # to getting garbled/reversed text on rotated pages.
+                pypdf_page = None
+                native_rotation = 0
+                try:
+                    local_reader = PdfReader(file_path)
+                    pypdf_page = local_reader.pages[page_num - 1]
+                    native_rotation = pypdf_page.get("/Rotate", 0)
+                except Exception:
+                    print(f"   ⚠️ Page {page_num}: Could not fetch page rotation metadata.")
+
+                if (native_rotation in [90, 270] or needs_forced_rotation) and pypdf_page is not None and not used_fallback:
+                    rotation_angle = (360 - native_rotation) if native_rotation in [90, 270] else 90
+                    print(f"   -> Page {page_num}: Adjusting layout by {rotation_angle}° to normalize horizontal reading axis...")
+                    try:
+                        pypdf_page.rotate(rotation_angle)
+                        raw_text = pypdf_page.extract_text() or ""
+                        used_fallback = True
+                    except Exception as e:
+                        print(f"   ⚠️ Rotation parsing stream bottleneck on Page {page_num}: {e}")
+
+                # --- STEP 3: Normal extraction path if rotation wasn't needed ---
+                if not used_fallback:
+                    try:
+                        tables = page.extract_tables()
+                        raw_text = page.extract_text() or ""
+                    except Exception:
+                        print(f"   ⚠️ Layout stream bottleneck on Page {page_num}. Executing recovery...")
+                        try:
+                            if pypdf_page is not None:
+                                raw_text = pypdf_page.extract_text() or ""
+                                used_fallback = True
+                        except Exception:
+                            print(f"   ❌ Critical Error: Page {page_num} unreadable. Skipping.")
+                            return None
+
+                # --- STEP 4: last-resort recovery if fallback path produced nothing ---
+                if used_fallback and not raw_text and pypdf_page is not None:
+                    try:
+                        raw_text = pypdf_page.extract_text() or ""
+                    except Exception:
+                        print(f"   ❌ Critical Recovery Error: Page {page_num} completely unparseable.")
+                        return None
+
+            # --- STEP 5: OCR fallback only when extracted text is genuinely poor/missing ---
+            # This is the expensive path, so most pages skip it entirely.
             if len(raw_text.strip()) < 50:
                 try:
                     with fitz.open(file_path) as fitz_doc:
@@ -115,7 +183,7 @@ class MultiUserParser:
             sanitized_text = "\n".join(cleaned_lines)
 
             table_markdown = ""
-            if tables:
+            if tables and not used_fallback:
                 for table in tables:
                     cleaned_table = [[str(cell) if cell is not None else "" for cell in row] for row in table]
                     for row in cleaned_table:
@@ -126,6 +194,8 @@ class MultiUserParser:
             combined_content = f"ATTENTION LLM: FILE: '{file_name}' | PAGE: {page_num} {image_summary_context}\n" + sanitized_text
             if table_markdown:
                 combined_content += "\n\n### Extracted Document Tables:\n" + table_markdown
+            elif used_fallback:
+                combined_content += "\n\n[System Note: Text structurally layout-normalized and parsed via horizontal fallback stream.]"
 
             return Document(
                 page_content=combined_content,
@@ -134,6 +204,7 @@ class MultiUserParser:
                     "page": page_num,
                     "has_table": bool(table_markdown),
                     "has_images": has_images,
+                    "was_rotated": used_fallback,
                     "user_id": user_id,
                     "session_id": session_id,
                     "file_id": file_id,
@@ -146,7 +217,6 @@ class MultiUserParser:
     @classmethod
     def _parse_pdf(cls, file_path: str, file_name: str, user_id: str, session_id: str, file_id: str) -> List[Document]:
         try:
-            from pypdf import PdfReader
             reader = PdfReader(file_path)
             total_pages = len(reader.pages)
         except Exception as e:
@@ -177,7 +247,7 @@ class MultiUserParser:
                 if res is not None:
                     parent_documents.append(res)
 
-        # executor.map preserves entry order chronology seamlessly 
+        # executor.map preserves entry order chronology seamlessly
         return parent_documents
 
     # ------------------------------------------------------------------
